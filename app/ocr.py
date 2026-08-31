@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 import os
 from pathlib import Path
+
 
 class OCRService:
     def __init__(self, model_dir: Path):

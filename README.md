@@ -21,6 +21,17 @@ uv pip install paddleocr paddlepaddle
 
 当前版本即使未安装或未下载 OCR/NER 模型，规则引擎仍可独立运行。首次模型初始化会下载约 409 MB 的 RaNER 权重；PaddleOCR 会在本机模型目录中准备中文 OCR 模型。
 
+## 最终版文件与批量能力
+
+- 支持 DOCX、XLSX/XLSM、PDF、PNG/JPEG/BMP/TIFF；输出保留原扩展名的脱敏文件。
+- Excel 扫描可见/隐藏工作表、单元格、公式、批注和超链接；XLSM 保留宏包但不会执行宏。
+- PDF 自动区分文字页和扫描页，扫描页使用 PaddleOCR 后进行页面遮盖。
+- 图片支持 OCR 框复核、手工框和按实体类型选择模糊、像素化或纯色遮盖。
+- 批量接口默认每批 20 个文件、总计 500 MB，失败项跳过并生成 ZIP 与 `report.json`。
+- 可逆模式默认关闭；开启后使用用户口令通过 scrypt + AES-GCM 加密本地映射和原始文件。
+
+环境变量：`TASK_TTL_HOURS`（默认 24）、`MAX_BATCH_FILES`（默认 20）、`MAX_BATCH_BYTES`（默认 524288000）。`.doc` 和 `.xls` 建议先转换为现代 Office 格式。
+
 ## 功能入口
 
 - 文本：分析实体、人工复核、占位符脱敏和任务恢复。
