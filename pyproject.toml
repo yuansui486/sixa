@@ -1,6 +1,6 @@
 [project]
 name = "local-desensitization"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -40,3 +40,10 @@ torch = [{ index = "pytorch-cpu" }]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = ["real_models: loads local PaddleOCR and RaNER model weights"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E9", "F"]

@@ -3,6 +3,13 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from presidio_analyzer import RecognizerResult
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
+
+
+_ANONYMIZER = AnonymizerEngine()
+
 DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
     "PERSON": {"text_action": "replace", "replacement": "某人", "image_action": "solid", "color": "#000000"},
     "ORGANIZATION": {"text_action": "replace", "replacement": "某机构", "image_action": "solid", "color": "#000000"},
@@ -28,7 +35,11 @@ DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
 
 def policy_for(entity_type: str, policies: dict | None = None) -> dict[str, Any]:
     merged = dict(DEFAULT_POLICIES.get(entity_type, DEFAULT_POLICIES["DEFAULT"]))
-    if policies and entity_type in policies:
+    # A request-level DEFAULT is the common policy for every entity/region;
+    # an entity-specific entry can then override individual fields.
+    if policies and isinstance(policies.get("DEFAULT"), dict):
+        merged.update(policies["DEFAULT"])
+    if policies and entity_type != "DEFAULT" and isinstance(policies.get(entity_type), dict):
         merged.update(policies[entity_type])
     return merged
 
@@ -51,7 +62,14 @@ def replacement_for(entity: dict, policies: dict | None, mapping: dict[tuple[str
     key = (entity_type, original)
     if key in mapping:
         return mapping[key]
-    if action == "keep":
+    # A custom word/regex recognizer may carry its own replacement from the
+    # rule editor.  Treat an explicitly configured type policy as an override;
+    # otherwise preserve the rule's replacement across every file adapter.
+    custom_replacement = entity.get("replacement")
+    custom_policy = bool(policies and entity_type in policies)
+    if entity.get("source") == "custom" and custom_replacement is not None and not custom_policy:
+        result = str(custom_replacement)
+    elif action == "keep":
         result = original
     elif action == "replace":
         result = str(policy.get("replacement") or "***")
@@ -70,11 +88,47 @@ def replacement_for(entity: dict, policies: dict | None, mapping: dict[tuple[str
 
 def apply_entities(text: str, entities: list[dict], policies: dict | None = None, mapping: dict | None = None) -> tuple[str, dict]:
     mapping = mapping if mapping is not None else {}
-    output = text
     selected = [e for e in entities if e.get("selected", True)]
-    for entity in sorted(selected, key=lambda item: (int(item["start"]), int(item["end"])), reverse=True):
+    ordered = sorted(selected, key=lambda item: (int(item["start"]), int(item["end"])))
+    previous_end = -1
+    for entity in ordered:
         start, end = int(entity["start"]), int(entity["end"])
         if start < 0 or end < start or end > len(text) or text[start:end] != entity.get("text"):
             raise ValueError("实体区间与原文不一致")
-        output = output[:start] + replacement_for(entity, policies, mapping) + output[end:]
-    return output, mapping
+        if end <= start:
+            raise ValueError("实体区间无效")
+        if start < previous_end:
+            raise ValueError("实体区间存在重叠")
+        previous_end = end
+    if not ordered:
+        return text, mapping
+
+    replacements: dict[tuple[str, str], str] = {}
+    analyzer_results: list[RecognizerResult] = []
+    for entity in ordered:
+        entity_type = str(entity.get("type", "DEFAULT"))
+        original = str(entity.get("text", ""))
+        replacements[(entity_type, original)] = replacement_for(entity, policies, mapping)
+        analyzer_results.append(
+            RecognizerResult(
+                entity_type=entity_type,
+                start=int(entity["start"]),
+                end=int(entity["end"]),
+                score=float(entity.get("score", 1.0)),
+            )
+        )
+
+    def operator_for(entity_type: str) -> OperatorConfig:
+        return OperatorConfig(
+            "custom",
+            {"lambda": lambda value: replacements[(entity_type, value)]},
+        )
+
+    operators = {result.entity_type: operator_for(result.entity_type) for result in analyzer_results}
+    result = _ANONYMIZER.anonymize(
+        text=text,
+        analyzer_results=analyzer_results,
+        operators=operators,
+        merge_entities_with_spaces=False,
+    )
+    return result.text, mapping

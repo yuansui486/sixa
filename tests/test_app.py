@@ -18,6 +18,15 @@ def test_validators():
     assert not valid_ip("1.2.3.4.5")
     assert not valid_ip("abc.1.1.1")
 
+
+def test_chinese_labels_do_not_hide_id_card_boundaries():
+    text = "客户身份证11010519491231002X，信息已核验"
+    entities = client.post("/api/text/analyze", json={"text": text}).json()["entities"]
+    assert any(
+        item["type"] == "ID_CARD" and item["text"] == "11010519491231002X"
+        for item in entities
+    )
+
 def test_text_roundtrip_and_selection():
     text = "张三电话13800138000，邮箱 a@test.com"
     entities = client.post("/api/text/analyze", json={"text": text}).json()["entities"]
@@ -25,6 +34,8 @@ def test_text_roundtrip_and_selection():
     result = client.post("/api/text/mask", json={"text": text, "entities": entities}).json()
     assert "13800138000" in result["masked_text"]
     assert "a@test.com" not in result["masked_text"]
+    task = next(item for item in client.get("/api/tasks").json()["tasks"] if item["id"] == result["task_id"])
+    assert task["status"] == "completed"
     restored = client.post("/api/text/unmask", json={"task_id": result["task_id"]}).json()
     assert restored["text"] == text
 
@@ -86,11 +97,36 @@ def test_document_analyze_txt():
 def test_cleanup_removes_old_non_text_task():
     response = client.post("/api/document/analyze", files={"file": ("old.txt", b"old", "text/plain")})
     task_id = response.json()["analysis_id"]
-    c = conn(); c.execute("UPDATE tasks SET created=? WHERE id=?", (0, task_id)); c.commit(); c.close()
+    c = conn(); c.execute("UPDATE tasks SET created=?,updated=? WHERE id=?", (0, 0, task_id)); c.commit(); c.close()
     assert (TASKS / task_id).is_dir()
     cleanup()
     assert not (TASKS / task_id).exists()
     assert not any(t["id"] == task_id for t in client.get("/api/tasks").json()["tasks"])
+
+
+def test_task_history_paginates_and_filters():
+    created = []
+    for index in range(3):
+        response = client.post(
+            "/api/text/mask",
+            json={"text": f"paging-{index}", "entities": []},
+        )
+        assert response.status_code == 200
+        task_id = response.json()["task_id"]
+        c = conn()
+        c.execute("UPDATE tasks SET kind=? WHERE id=?", ("paging_fixture", task_id))
+        c.commit(); c.close()
+        created.append(task_id)
+    try:
+        first = client.get("/api/tasks?kind=paging_fixture&limit=2&offset=0").json()
+        second = client.get("/api/tasks?kind=paging_fixture&limit=2&offset=2").json()
+        assert first["total"] == 3
+        assert len(first["tasks"]) == 2
+        assert len(second["tasks"]) == 1
+        assert {item["id"] for item in first["tasks"] + second["tasks"]} == set(created)
+    finally:
+        for task_id in created:
+            client.delete(f"/api/tasks/{task_id}")
 
 def test_unified_docx_xlsx_pdf_image_and_batch():
     import fitz
@@ -120,10 +156,20 @@ def test_unified_docx_xlsx_pdf_image_and_batch():
     assert client.get(masked["artifact"]).status_code == 200
 
     batch = client.post("/api/batches", files=[("files", ("one.txt", b"13800138000", "text/plain")), ("files", ("two.txt", b"hello", "text/plain"))], data={"options": '{"reviewed": true}'}).json()
-    for _ in range(50):
+    import time
+    for _ in range(100):
+        status = client.get(f"/api/batches/{batch['batch_id']}").json()
+        if status.get("status") == "awaiting_review":
+            break
+        time.sleep(0.05)
+    assert status["status"] == "awaiting_review"
+    reviewed_items = status.get("items", [])
+    execute = client.post(f"/api/batches/{batch['batch_id']}/mask", json={"reviewed": True, "items": reviewed_items})
+    assert execute.status_code == 200
+    for _ in range(100):
         status = client.get(f"/api/batches/{batch['batch_id']}").json()
         if status.get("archive"): break
-        import time; time.sleep(0.05)
+        time.sleep(0.05)
     assert status["status"] in {"completed", "partial"}
     assert client.get(f"/api/batches/{batch['batch_id']}/download").status_code == 200
 

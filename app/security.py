@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 AAD = b"local-desensitization-v1"
@@ -60,6 +61,8 @@ def decrypt_json(blob: bytes, password: str) -> dict:
         if len(data) > MAX_PAYLOAD_BYTES:
             raise ValueError("解密载荷过大")
         payload = json.loads(data.decode("utf-8"))
+    except InvalidTag as exc:
+        raise ValueError("口令错误或加密数据已损坏") from exc
     except ValueError:
         raise
     except (KeyError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
