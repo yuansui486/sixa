@@ -368,6 +368,8 @@ def analyze(text):
             if check and not check(m.group()): continue
             found.append({'id':uuid.uuid4().hex,'type':typ,'text':m.group(),'start':m.start(),'end':m.end(),'score':.99 if check else .95,'recognizer':'builtin','source':'regex','selected':True,'box_ids':[]})
     for name,kind,pattern,typ,replacement in custom:
+        if kind == 'category':
+            continue
         expression = pattern if kind == 'regex' else re.escape(pattern)
         try:
             matches = re.finditer(expression,text,re.IGNORECASE)
@@ -458,6 +460,13 @@ class RuleIn(BaseModel):
     pattern: str = Field(min_length=1, max_length=10_000)
     entity_type: str = Field(default='CUSTOM', min_length=1, max_length=80)
     replacement: str = Field(default='__MASKED_CUSTOM__', max_length=500)
+class CustomSensitiveIn(BaseModel):
+    mode: str = Field(default='literal', pattern='^(literal|category)$')
+    value: str = Field(min_length=1, max_length=10_000)
+    name: str | None = Field(default=None, max_length=120)
+    entity_type: str = Field(default='CUSTOM', min_length=1, max_length=80)
+    replacement: str = Field(default='已脱敏', max_length=500)
+    enabled: bool = True
 class Box(BaseModel):
     id: str = Field(default_factory=lambda:uuid.uuid4().hex, max_length=128)
     page: int = Field(default=1, ge=1, le=10000)
@@ -748,6 +757,42 @@ def add_rule(v:RuleIn):
 @app.delete('/api/rules/{rule_id}')
 def remove_rule(rule_id):
     c=conn(); c.execute('DELETE FROM rules WHERE id=?',(rule_id,)); c.commit(); c.close(); return {'deleted':rule_id}
+
+@app.get('/api/custom-sensitive')
+def list_custom_sensitive():
+    c=conn(); rows=c.execute("SELECT id,name,kind,pattern,entity_type,replacement,enabled FROM rules WHERE kind IN ('word','literal','category')").fetchall(); c.close()
+    keys=('id','name','kind','pattern','entity_type','replacement','enabled')
+    return {'items':[{**dict(zip(keys,row)), 'mode':('category' if row[2]=='category' else 'literal'), 'value':row[3]} for row in rows]}
+
+@app.post('/api/custom-sensitive')
+def add_custom_sensitive(v: CustomSensitiveIn):
+    i=uuid.uuid4().hex; kind='literal' if v.mode=='literal' else 'category'; c=conn()
+    c.execute('INSERT INTO rules VALUES(?,?,?,?,?,?,?)',(i,v.name or v.value,kind,v.value,v.entity_type,v.replacement,int(v.enabled))); c.commit(); c.close()
+    if v.mode == 'category':
+        _load_policy_store()
+        base = dict(policy_store.get(v.entity_type, DEFAULT_POLICIES.get(v.entity_type, DEFAULT_POLICIES['DEFAULT'])))
+        base.update({'text_action': 'replace', 'replacement': v.replacement})
+        policy_store[v.entity_type] = base
+        _persist_policy_store()
+        settings = _rule_settings()
+        if v.entity_type in {typ for typ, _, _ in PATTERNS}:
+            settings[v.entity_type.lower()] = bool(v.enabled)
+        elif v.entity_type in {'PERSON', 'ORGANIZATION', 'LOCATION', 'GPE'}:
+            settings['ner_enabled'] = bool(v.enabled)
+        _save_rule_settings(settings)
+    return {'id':i,'mode':v.mode,'value':v.value}
+
+@app.patch('/api/custom-sensitive/{rule_id}')
+def update_custom_sensitive(rule_id: str, v: CustomSensitiveIn):
+    c=conn(); kind='literal' if v.mode=='literal' else 'category'; cur=c.execute('UPDATE rules SET name=?,kind=?,pattern=?,entity_type=?,replacement=?,enabled=? WHERE id=?',(v.name or v.value,kind,v.value,v.entity_type,v.replacement,int(v.enabled),rule_id)); c.commit(); c.close()
+    if not cur.rowcount: raise HTTPException(404,'自定义敏感项不存在')
+    return {'id':rule_id,'mode':v.mode,'value':v.value}
+
+@app.delete('/api/custom-sensitive/{rule_id}')
+def delete_custom_sensitive(rule_id: str):
+    c=conn(); cur=c.execute("DELETE FROM rules WHERE id=? AND kind IN ('word','literal','category')",(rule_id,)); c.commit(); c.close()
+    if not cur.rowcount: raise HTTPException(404,'自定义敏感项不存在')
+    return {'deleted':rule_id}
 @app.post('/api/image/analyze')
 def image_analyze(file:UploadFile=File(...)):
     data=file.file.read(MAX_UPLOAD+1)

@@ -80,8 +80,10 @@ def replacement_for(entity: dict, policies: dict | None, mapping: dict[tuple[str
     # rule editor.  Treat an explicitly configured type policy as an override;
     # otherwise preserve the rule's replacement across every file adapter.
     custom_replacement = entity.get("replacement")
-    custom_policy = bool(policies and entity_type in policies)
-    if entity.get("source") == "custom" and custom_replacement is not None and not custom_policy:
+    # A literal custom rule carries its own replacement.  This must take
+    # precedence over the generic CUSTOM policy so each user-defined word can
+    # be configured independently.
+    if entity.get("source") == "custom" and custom_replacement is not None and entity.get("inherit_policy") is not True:
         result = str(custom_replacement)
     elif action == "keep":
         result = original
