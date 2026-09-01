@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field, ValidationError
@@ -65,6 +65,32 @@ _cleanup_lock = threading.Lock()
 _last_cleanup = 0.0
 _model_init_lock = threading.Lock()
 _active_model_job: str | None = None
+_model_state = 'starting'
+_AUTO_INIT_ENABLED = os.getenv('LOCAL_DESENSITIZATION_AUTO_INIT', '1').lower() not in {'0', 'false', 'no'}
+_TEST_MODE = os.getenv('LOCAL_DESENSITIZATION_TEST_MODE', '').lower() in {'1', 'true', 'yes'}
+
+def models_ready() -> bool:
+    return bool(ner_service.available and ocr_service.available)
+
+def _model_gate_response():
+    status = model_status()
+    return JSONResponse(status_code=503, content={'detail':'模型尚未就绪，分析和脱敏暂不可用','code':'MODELS_NOT_READY','models':status})
+
+@app.on_event('startup')
+async def startup_models():
+    if not _AUTO_INIT_ENABLED or _TEST_MODE:
+        return
+    # Start initialization and wait for the first attempt. Analysis remains
+    # locked behind the middleware until both local models are ready.
+    result = initialize()
+    job_id = result.get('job_id') if isinstance(result, dict) else None
+    timeout = max(1, int(os.getenv('MODEL_INIT_TIMEOUT_SECONDS', '900')))
+    started = time.time()
+    while job_id and time.time() - started < timeout:
+        job = jobs.get(job_id, {})
+        if job.get('status') in {'completed', 'error'}:
+            break
+        await __import__('asyncio').sleep(0.25)
 
 def conn():
     c=sqlite3.connect(DB,check_same_thread=False, timeout=10)
@@ -296,7 +322,22 @@ def luhn(v):
 def valid_ip(v):
     parts = v.split('.')
     return len(parts) == 4 and all(re.fullmatch(r'[0-9]{1,3}', part) and 0 <= int(part) <= 255 for part in parts)
-PATTERNS=[('PHONE',r'(?<!\d)(?:1[3-9]\d{9}|0\d{2,3}-?\d{7,8})(?!\d)',None),('ID_CARD',r'(?<![0-9A-Za-z])\d{17}[\dXx](?![0-9A-Za-z])',valid_id),('BANK_CARD',r'(?<!\d)\d{16,19}(?!\d)',luhn),('EMAIL',r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',None),('IP_ADDRESS',r'(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])',valid_ip),('DATE_TIME',r'\d{4}[年\-/]\d{1,2}[月\-/]\d{1,2}日?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?',None),('MONEY',r'(?:人民币|RMB|￥|¥)\s?\d+(?:\.\d+)?|\d+(?:\.\d+)?(?:元|万元|亿元|美元|欧元)',None),('LICENSE_PLATE',r'[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼][A-Z][A-Z0-9挂学警港澳领使]{5,6}',None)]
+PATTERNS=[
+    ('PHONE',r'(?<!\d)(?:1[3-9]\d{9}|0\d{2,3}-?\d{7,8})(?!\d)',None),
+    ('ID_CARD',r'(?<![0-9A-Za-z])\d{17}[\dXx](?![0-9A-Za-z])',valid_id),
+    ('BANK_CARD',r'(?<!\d)\d{16,19}(?!\d)',luhn),
+    ('EMAIL',r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',None),
+    ('IP_ADDRESS',r'(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])',valid_ip),
+    ('DATE_TIME',r'\d{4}[年\-/]\d{1,2}[月\-/]\d{1,2}日?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?',None),
+    ('MONEY',r'(?:人民币|RMB|￥|¥)\s?\d+(?:\.\d+)?|\d+(?:\.\d+)?(?:元|万元|亿元|美元|欧元)',None),
+    ('LICENSE_PLATE',r'[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼][A-Z][A-Z0-9挂学警港澳领使]{5,6}',None),
+    ('WECHAT_ID',r'(?<![A-Za-z0-9_-])[A-Za-z][-_A-Za-z0-9]{5,19}(?![A-Za-z0-9_-])',None),
+    ('POSTAL_CODE',r'(?<!\d)[1-9]\d{5}(?!\d)',None),
+    ('QQ_NUMBER',r'(?<!\d)[1-9]\d{4,11}(?!\d)',None),
+    ('PASSPORT',r'(?<![A-Za-z0-9])[EGPASD][A-Za-z0-9]\d{7}(?![A-Za-z0-9])',None),
+    ('MAC_ADDRESS',r'(?<![A-Fa-f0-9])(?:[A-Fa-f0-9]{2}[:-]){5}[A-Fa-f0-9]{2}(?![A-Fa-f0-9])',None),
+    ('URL',r'(?<![A-Za-z0-9])https?://[^\s，。；;]+',None),
+]
 def analyze(text):
     c=conn(); custom=c.execute('SELECT name,kind,pattern,entity_type,replacement FROM rules WHERE enabled=1').fetchall(); c.close(); found=[]
     for typ,pat,check in PATTERNS:
@@ -317,12 +358,15 @@ def analyze(text):
             if m.start() == m.end():
                 continue
             found.append({'id':uuid.uuid4().hex,'type':typ,'text':m.group(),'start':m.start(),'end':m.end(),'score':1.0,'recognizer':name or 'custom','source':'custom','replacement':replacement,'selected':True,'box_ids':[]})
-    found.extend([{**e,'id':uuid.uuid4().hex,'selected':True,'box_ids':[]} for e in ner_service.analyze(text)])
-    found.sort(key=lambda x:(x['start'],-x['end'])); accepted=[]
+    found.extend([{**e,'id':uuid.uuid4().hex,'selected':float(e.get('score',0)) >= 0.45,'box_ids':[]} for e in ner_service.analyze(text)])
+    # Prefer higher confidence and longer spans when recognizers overlap.
+    found.sort(key=lambda x:(-float(x.get('score',0)), -(x['end']-x['start']), x['start']))
+    accepted=[]
     for e in found:
         if not any(e['start']<a['end'] and a['start']<e['end'] for a in accepted): accepted.append(e)
         if len(accepted) >= MAX_ENTITIES:
             break
+    accepted.sort(key=lambda x:(x['start'], -x['end']))
     # Normalize every detection through Presidio's public result type so all
     # adapters expose one protocol regardless of recognizer implementation.
     try:
@@ -472,23 +516,28 @@ def apply_mask(text, entities, policies=None):
 async def housekeeping(request,call_next):
     _load_policy_store()
     cleanup(force=False)
+    path = request.url.path
+    if not _TEST_MODE and path.startswith('/api/') and (path.endswith('/analyze') or path.endswith('/mask')) and not models_ready():
+        return _model_gate_response()
     return await call_next(request)
 @app.get('/api/health')
 def health(): return {'status':'ok','local_only':True,'version':app.version}
 @app.get('/api/models/status')
 def model_status():
-    return {'initialized':ner_service.available, 'ner_available':ner_service.available,
+    overall = 'ready' if models_ready() else ('failed' if (ner_service.error or ocr_service.error) else 'starting')
+    return {'initialized':models_ready(), 'ner_available':ner_service.available,
             'ocr_available':ocr_service.engine is not None, 'device':'cpu', 'model':MODEL_ID,
             'ner_error':ner_service.error, 'ocr_error':ocr_service.error,
-            'status': 'ready' if ner_service.available and ocr_service.engine else ('partial' if ner_service.available or ocr_service.engine else 'unavailable')}
+            'status': overall, 'retryable': overall == 'failed'}
 @app.post('/api/models/initialize')
 def initialize():
-    global _active_model_job
+    global _active_model_job, _model_state
     with _model_init_lock:
         if _active_model_job and jobs.get(_active_model_job, {}).get('status') == 'running':
             return {'job_id': _active_model_job, 'reused': True}
         i=uuid.uuid4().hex
         _active_model_job = i
+        _model_state = 'retrying' if ner_service.error or ocr_service.error else 'starting'
         jobs[i]={'status':'running','progress':5,'message':'正在初始化中文模型','created':time.time()}
         completed_jobs = [
             key for key, value in jobs.items()
@@ -503,13 +552,15 @@ def initialize():
             ner_service.load(download=True, device='cpu')
             jobs[i].update({'progress':60, 'ner_status':'ready' if ner_service.available else 'error', 'ner_error':ner_service.error})
             ocr_service.load()
-            ready = ner_service.available or ocr_service.engine
+            ready = models_ready()
+            _model_state = 'ready' if ready else 'failed'
             jobs[i]={'status':'completed' if ready else 'error','progress':100 if ready else 0,
                      'message':'模型初始化完成' if ready else '模型初始化失败',
                      'ner_status':'ready' if ner_service.available else 'error',
                      'ocr_status':'ready' if ocr_service.engine else 'error',
                      'ner_error':ner_service.error, 'ocr_error':ocr_service.error}
         except Exception as exc:
+            _model_state = 'failed'
             jobs[i]={'status':'error','progress':0,'message':f'模型初始化异常: {exc}',
                      'ner_status':'ready' if ner_service.available else 'error',
                      'ocr_status':'ready' if ocr_service.engine else 'error', 'ner_error':ner_service.error, 'ocr_error':str(exc)}
@@ -1971,6 +2022,8 @@ def _run_batch(batch_id: str, options: BatchMaskIn | None = None):
 
 @app.post('/api/batches')
 def create_batch(files: list[UploadFile] = File(...), options: str = Form('{}')):
+    if not _TEST_MODE and not models_ready():
+        return _model_gate_response()
     if len(files) > MAX_BATCH_FILES:
         raise HTTPException(413, f'每批最多 {MAX_BATCH_FILES} 个文件')
     if not files:
@@ -2029,6 +2082,8 @@ def cancel_batch(batch_id: str):
 
 @app.post('/api/batches/{batch_id}/mask')
 def mask_batch(batch_id: str, value: BatchMaskIn):
+    if not _TEST_MODE and not models_ready():
+        return _model_gate_response()
     state = _load_batch_state(batch_id)
     if not state:
         raise HTTPException(404, 'batch not found')
