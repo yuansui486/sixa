@@ -34,6 +34,7 @@ DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
     "WECHAT_ID": {"text_action": "replace", "replacement": "微信用户", "image_action": "solid", "color": "#000000"},
     "QQ_NUMBER": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
     "POSTAL_CODE": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
+    "CUSTOM": {"text_action": "replace", "replacement": "已脱敏", "image_action": "solid", "color": "#000000"},
     "DEFAULT": {"text_action": "token", "replacement": "", "image_action": "solid", "color": "#000000"},
 }
 # Normalize built-ins so every entity has the same usable image defaults.
