@@ -1053,6 +1053,9 @@ def _redact_image(
             except (TypeError, ValueError):
                 radius = 14
             image.alpha_composite(region.filter(ImageFilter.GaussianBlur(radius)), (left, top))
+            if policy.get("show_replacement", True):
+                replacement = replacement_for(entity, policies, {})
+                _draw_mask_text(image, (left, top, right, bottom), replacement)
         elif action == "pixelate":
             try:
                 factor = max(2, min(40, int(policy.get("pixel_size", 12) or 12)))

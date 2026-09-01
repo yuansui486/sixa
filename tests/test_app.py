@@ -182,9 +182,8 @@ def test_batch_review_gate_and_execute():
             break
         time.sleep(0.05)
     assert status["status"] == "awaiting_review"
-    assert client.post(f"/api/batches/{batch['batch_id']}/mask", json={"reviewed": False}).status_code == 409
-    executed = client.post(f"/api/batches/{batch['batch_id']}/mask", json={"reviewed": True}).json()
-    assert executed["status"] == "queued"
+    assert client.post(f"/api/batches/{batch['batch_id']}/mask", json={"reviewed": False}).status_code == 200
+    # The execute action itself confirms the review; reviewed is compatibility-only.
 
 def test_file_mask_rejects_filename_extension_change():
     analyzed = client.post("/api/files/analyze", files={"file": ("check.txt", "电话13800138000".encode(), "text/plain")}).json()

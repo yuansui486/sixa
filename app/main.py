@@ -49,7 +49,7 @@ from .file_handlers import (
 )
 from .ner import MODEL_ID, RaanerService
 from .ocr import OCRService
-from .policies import DEFAULT_POLICIES, apply_entities
+from .policies import DEFAULT_POLICIES, POLICY_VERSION, apply_entities
 from .security import decrypt_json, encrypt_json, validate_password
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -380,7 +380,7 @@ def store(original,masked,kind='text'):
 class TextIn(BaseModel): text:str=Field(min_length=1,max_length=2_000_000)
 class MaskIn(BaseModel):
     text: str = Field(min_length=1, max_length=2_000_000)
-    entities: list[dict[str, Any]] = Field(default_factory=list, max_length=MAX_ENTITIES)
+    entities: list[dict[str, Any]] | None = Field(default=None, max_length=MAX_ENTITIES)
 class RestoreIn(BaseModel):
     task_id: str
     masked_text: str | None = Field(default=None, max_length=2_000_000)
@@ -410,7 +410,7 @@ class DocumentMaskIn(MaskIn):
     analysis_id: str | None = None
     filename: str | None = Field(default=None, max_length=240)
     policies: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=500)
-    boxes: list[dict[str, Any]] = Field(default_factory=list, max_length=MAX_IMAGE_BOXES)
+    boxes: list[dict[str, Any]] | None = Field(default=None, max_length=MAX_IMAGE_BOXES)
     reviewed: bool = True
     reversible: bool = False
     password: str | None = Field(default=None, max_length=256)
@@ -790,19 +790,19 @@ class FileMaskIn(BaseModel):
     analysis_id: str
     filename: str = Field(min_length=1, max_length=240)
     text: str = Field(default='', max_length=2_000_000)
-    entities: list[dict[str, Any]] = Field(default_factory=list, max_length=MAX_ENTITIES)
+    entities: list[dict[str, Any]] | None = Field(default=None, max_length=MAX_ENTITIES)
     policies: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=500)
     reviewed: bool = False
     reversible: bool = False
     password: str | None = Field(default=None, max_length=256)
-    boxes: list[dict[str, Any]] = Field(default_factory=list, max_length=MAX_IMAGE_BOXES)
+    boxes: list[dict[str, Any]] | None = Field(default=None, max_length=MAX_IMAGE_BOXES)
 
 class BatchMaskIn(BaseModel):
     policies: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=500)
     reviewed: bool = False
     reversible: bool = False
     password: str | None = Field(default=None, max_length=256)
-    items: list[dict[str, Any]] = Field(default_factory=list, max_length=MAX_BATCH_FILES)
+    items: list[dict[str, Any]] | None = Field(default=None, max_length=MAX_BATCH_FILES)
 
 def _task_folder(task_id: str, *, create: bool = False) -> Path:
     """Resolve a task directory, creating it only for an explicit write.
@@ -1389,6 +1389,8 @@ def _validate_policy_map(value: Any) -> dict[str, dict[str, Any]]:
         color = policy.get('color')
         if color is not None and (not isinstance(color, str) or len(color) > 32):
             raise HTTPException(422, f'策略颜色无效: {entity_type}')
+        if 'show_replacement' in policy and not isinstance(policy['show_replacement'], bool):
+            raise HTTPException(422, f'替换文字开关无效: {entity_type}')
         result[entity_type] = dict(policy)
     return result
 
@@ -1400,7 +1402,14 @@ _load_policy_store()
 @app.get('/api/policies')
 def get_policies():
     _load_policy_store()
-    return {'policies': policy_store}
+    return {'policies': policy_store, 'catalog': list(policy_store.keys()), 'defaults_version': POLICY_VERSION}
+
+@app.post('/api/policies/reset')
+def reset_policies():
+    global policy_store
+    policy_store = {key: dict(value) for key, value in DEFAULT_POLICIES.items()}
+    _persist_policy_store()
+    return {'policies': policy_store, 'defaults_version': POLICY_VERSION}
 
 @app.put('/api/policies')
 def put_policies(value: dict[str, dict[str, Any]]):
@@ -1481,8 +1490,8 @@ def files_analyze(file: UploadFile = File(...)):
 
 @app.post('/api/files/mask')
 def files_mask(value: FileMaskIn):
-    if not value.reviewed:
-        raise HTTPException(409, '请先完成实体复核')
+    # `reviewed` is retained for client compatibility. The execute action is
+    # the confirmation; individual selected flags remain authoritative.
     folder = _task_folder(value.analysis_id)
     source = folder / 'source.bin'
     if not source.is_file():
@@ -1506,8 +1515,10 @@ def files_mask(value: FileMaskIn):
     if not isinstance(server_entities, list):
         raise HTTPException(409, '分析实体格式无效')
     allow_new = extension(server_filename) in IMAGE_EXTENSIONS or extension(server_filename) == 'pdf'
-    entities = _review_entities(server_entities, value.entities, allow_new=allow_new)
-    boxes = _validate_boxes(value.boxes)
+    submitted_entities = server_entities if value.entities is None else value.entities
+    submitted_boxes = manifest.get('boxes', []) if value.boxes is None else value.boxes
+    entities = _review_entities(server_entities, submitted_entities, allow_new=allow_new)
+    boxes = _validate_boxes(submitted_boxes)
     entities, boxes = _synchronize_review_selection(entities, boxes)
     file_ext = extension(server_filename)
     if file_ext == 'pdf':
@@ -1878,11 +1889,11 @@ def _run_batch(batch_id: str, options: BatchMaskIn | None = None):
             _cleanup_batch_private_files(batch_id, state)
         _save_batch(batch_id, state)
         return
-    if not options or not options.reviewed:
+    if options is None:
         state['status'] = 'awaiting_review'; _save_batch(batch_id, state); return
     state['status'] = 'running'; state['completed'] = 0; state['failed'] = 0
     archive_dir = _task_path(batch_id, create=True); archive_dir.mkdir(parents=True, exist_ok=True); used=set()
-    submitted_items = options.items or state.get('reviewed_items', [])
+    submitted_items = options.items if options.items is not None else state.get('reviewed_items', [])
     submitted = {str(item.get('task_id')): item for item in submitted_items if isinstance(item, dict) and item.get('task_id')}
     for item in state.get('items', []):
         if state.get('cancelled'): break
@@ -2023,8 +2034,6 @@ def mask_batch(batch_id: str, value: BatchMaskIn):
         raise HTTPException(404, 'batch not found')
     if state.get('status') != 'awaiting_review':
         raise HTTPException(409, '批次当前不在待复核状态')
-    if not value.reviewed:
-        raise HTTPException(409, '请先完成实体复核')
     if value.reversible:
         _validate_reversible_password(value.password)
     request_policies = _validate_policy_map(value.policies)

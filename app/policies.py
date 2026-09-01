@@ -10,6 +10,8 @@ from presidio_anonymizer.entities import OperatorConfig
 
 _ANONYMIZER = AnonymizerEngine()
 
+POLICY_VERSION = 2
+_COMMON_IMAGE = {"image_action": "blur", "show_replacement": True, "blur_radius": 16, "pixel_size": 12, "color": "#000000"}
 DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
     "PERSON": {"text_action": "replace", "replacement": "某人", "image_action": "solid", "color": "#000000"},
     "ORGANIZATION": {"text_action": "replace", "replacement": "某机构", "image_action": "solid", "color": "#000000"},
@@ -31,6 +33,10 @@ DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
     "MAC_ADDRESS": {"text_action": "replace", "replacement": "***", "image_action": "solid", "color": "#000000"},
     "DEFAULT": {"text_action": "token", "replacement": "", "image_action": "solid", "color": "#000000"},
 }
+# Normalize built-ins so every entity has the same usable image defaults.
+for _name, _policy in DEFAULT_POLICIES.items():
+    for _key, _value in _COMMON_IMAGE.items():
+        _policy[_key] = _value
 
 
 def policy_for(entity_type: str, policies: dict | None = None) -> dict[str, Any]:
