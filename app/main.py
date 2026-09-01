@@ -338,12 +338,33 @@ PATTERNS=[
     ('MAC_ADDRESS',r'(?<![A-Fa-f0-9])(?:[A-Fa-f0-9]{2}[:-]){5}[A-Fa-f0-9]{2}(?![A-Fa-f0-9])',None),
     ('URL',r'(?<![A-Za-z0-9])https?://[^\s，。；;]+',None),
 ]
+ENTITY_CATALOG = {
+    'PERSON':'个人姓名','ORGANIZATION':'组织机构','LOCATION':'地点','GPE':'国家/地区','ADDRESS':'详细地址',
+    'PHONE':'电话号码','ID_CARD':'身份证号','BANK_CARD':'银行卡号','EMAIL':'电子邮箱','IP_ADDRESS':'IP 地址',
+    'DATE_TIME':'日期时间','MONEY':'金额','LICENSE_PLATE':'车牌号','WECHAT_ID':'微信号','QQ_NUMBER':'数字账号/编号',
+    'POSTAL_CODE':'邮政编码','PASSPORT':'护照号','MAC_ADDRESS':'设备地址','URL':'网页地址',
+}
+BUILTIN_RULES = {typ:{'id':typ.lower(), 'name':ENTITY_CATALOG.get(typ,typ), 'entity_type':typ,
+                       'kind':'内置规则', 'description':'系统内置敏感信息识别', 'editable':False}
+                 for typ, _, _ in PATTERNS}
+def _rule_settings():
+    c=conn(); row=c.execute('SELECT value FROM settings WHERE key=?',('builtin_rules',)).fetchone(); c.close()
+    try: value=json.loads(row[0]) if row else {}
+    except (TypeError, ValueError, json.JSONDecodeError): value={}
+    return value if isinstance(value,dict) else {}
+def _save_rule_settings(value):
+    c=conn(); c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',('builtin_rules',json.dumps(value,ensure_ascii=False))); c.commit(); c.close()
 def analyze(text):
-    c=conn(); custom=c.execute('SELECT name,kind,pattern,entity_type,replacement FROM rules WHERE enabled=1').fetchall(); c.close(); found=[]
+    c=conn(); custom=c.execute('SELECT name,kind,pattern,entity_type,replacement FROM rules WHERE enabled=1').fetchall(); c.close(); found=[]; settings=_rule_settings()
     for typ,pat,check in PATTERNS:
+        if settings.get(typ.lower(), True) is False: continue
         for m in re.finditer(pat,text,re.IGNORECASE):
             if m.start() == m.end():
                 continue
+            if typ == 'QQ_NUMBER':
+                context = text[max(0, m.start()-8):min(len(text), m.end()+8)]
+                if not re.search(r'(?:QQ|扣扣|账号|帐号|联系号码|联系号)', context, re.IGNORECASE):
+                    continue
             if check and not check(m.group()): continue
             found.append({'id':uuid.uuid4().hex,'type':typ,'text':m.group(),'start':m.start(),'end':m.end(),'score':.99 if check else .95,'recognizer':'builtin','source':'regex','selected':True,'box_ids':[]})
     for name,kind,pattern,typ,replacement in custom:
@@ -358,7 +379,8 @@ def analyze(text):
             if m.start() == m.end():
                 continue
             found.append({'id':uuid.uuid4().hex,'type':typ,'text':m.group(),'start':m.start(),'end':m.end(),'score':1.0,'recognizer':name or 'custom','source':'custom','replacement':replacement,'selected':True,'box_ids':[]})
-    found.extend([{**e,'id':uuid.uuid4().hex,'selected':float(e.get('score',0)) >= 0.45,'box_ids':[]} for e in ner_service.analyze(text)])
+    if settings.get('ner_enabled', True):
+        found.extend([{**e,'id':uuid.uuid4().hex,'selected':float(e.get('score',0)) >= 0.45,'box_ids':[]} for e in ner_service.analyze(text)])
     # Prefer higher confidence and longer spans when recognizers overlap.
     found.sort(key=lambda x:(-float(x.get('score',0)), -(x['end']-x['start']), x['start']))
     accepted=[]
@@ -703,7 +725,19 @@ def artifact(task_id,name):
     return FileResponse(p, filename=name, content_disposition_type='attachment')
 @app.get('/api/rules')
 def rules():
-    c=conn(); rows=c.execute('SELECT id,name,kind,pattern,entity_type,replacement,enabled FROM rules').fetchall(); c.close(); keys=('id','name','kind','pattern','entity_type','replacement','enabled'); return {'rules':[dict(zip(keys,r)) for r in rows]}
+    c=conn(); rows=c.execute('SELECT id,name,kind,pattern,entity_type,replacement,enabled FROM rules').fetchall(); c.close(); keys=('id','name','kind','pattern','entity_type','replacement','enabled'); settings=_rule_settings(); builtin=[]
+    for typ, meta in BUILTIN_RULES.items(): builtin.append({**meta, 'enabled': settings.get(typ.lower(), True)})
+    return {'rules':[dict(zip(keys,r)) for r in rows], 'builtin_rules':builtin, 'ner_enabled':settings.get('ner_enabled',True), 'entity_catalog':ENTITY_CATALOG}
+@app.patch('/api/rules/builtin/{rule_id}')
+def toggle_builtin(rule_id: str, value: dict[str, bool]):
+    typ=next((t for t,m in BUILTIN_RULES.items() if m['id']==rule_id), None)
+    if not typ: raise HTTPException(404,'内置规则不存在')
+    settings=_rule_settings(); settings[rule_id]=bool(value.get('enabled',True)); _save_rule_settings(settings)
+    return {'id':rule_id,'enabled':settings[rule_id]}
+@app.patch('/api/rules/model')
+def toggle_model(value: dict[str, bool]):
+    settings=_rule_settings(); settings['ner_enabled']=bool(value.get('enabled',True)); _save_rule_settings(settings)
+    return {'enabled':settings['ner_enabled']}
 @app.post('/api/rules')
 def add_rule(v:RuleIn):
     if v.kind not in {'word','regex'}: raise HTTPException(422,'kind must be word or regex')

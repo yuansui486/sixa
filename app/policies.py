@@ -31,6 +31,9 @@ DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
     "PASSPORT": {"text_action": "replace", "replacement": "证件号", "image_action": "solid", "color": "#000000"},
     "URL": {"text_action": "replace", "replacement": "***", "image_action": "solid", "color": "#000000"},
     "MAC_ADDRESS": {"text_action": "replace", "replacement": "***", "image_action": "solid", "color": "#000000"},
+    "WECHAT_ID": {"text_action": "replace", "replacement": "微信用户", "image_action": "solid", "color": "#000000"},
+    "QQ_NUMBER": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
+    "POSTAL_CODE": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
     "DEFAULT": {"text_action": "token", "replacement": "", "image_action": "solid", "color": "#000000"},
 }
 # Normalize built-ins so every entity has the same usable image defaults.
@@ -53,6 +56,10 @@ def policy_for(entity_type: str, policies: dict | None = None) -> dict[str, Any]
 def _mask_value(value: str, entity_type: str) -> str:
     if entity_type in {"PHONE", "PHONE_NUMBER"} and len(value) >= 7:
         return value[:3] + "*" * max(1, len(value) - 7) + value[-4:]
+    if entity_type == "QQ_NUMBER" and len(value) >= 5:
+        return value[:2] + "*" * max(1, len(value) - 4) + value[-2:]
+    if entity_type == "POSTAL_CODE" and len(value) == 6:
+        return value[:2] + "**" + value[-2:]
     if entity_type == "ID_CARD" and len(value) >= 10:
         return value[:6] + "*" * (len(value) - 10) + value[-4:]
     if entity_type == "BANK_CARD" and len(value) >= 4:
