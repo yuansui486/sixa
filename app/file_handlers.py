@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import math
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -971,21 +972,51 @@ def _image_box(entity: dict) -> tuple[float, float, float, float]:
     return x, y, width, height
 
 
-def _draw_mask_text(image: Image.Image, box: tuple[int, int, int, int], value: str) -> None:
-    left, top, right, _bottom = box
+def _system_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    windows_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+    candidates = [
+        windows_fonts / "msyh.ttc", windows_fonts / "simhei.ttf", windows_fonts / "simsun.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.is_file():
+            try:
+                return ImageFont.truetype(str(path), max(6, int(size)))
+            except (OSError, ValueError):
+                continue
+    return ImageFont.load_default()
+
+
+def _draw_mask_text(image: Image.Image, box: tuple[int, int, int, int], value: str) -> bool:
+    left, top, right, bottom = box
     draw = ImageDraw.Draw(image)
-    draw.rectangle(box, fill=(255, 255, 255, 255))
-    # A bundled font is not required.  The default bitmap font is clipped to
-    # the box so a long replacement cannot spill over neighboring content.
-    try:
-        font = ImageFont.load_default()
-    except (OSError, AttributeError):
-        font = None
     text = str(value or "已脱敏")
-    if font is not None:
-        while text and draw.textbbox((0, 0), text, font=font)[2] > max(1, right - left - 4):
+    max_width, max_height = max(1, right - left - 4), max(1, bottom - top - 2)
+    size = max(6, int(max_height * 0.82))
+    font = _system_font(size)
+    while size > 6:
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=0)
+        if bbox[2] - bbox[0] <= max_width and bbox[3] - bbox[1] <= max_height:
+            break
+        size -= 1
+        font = _system_font(size)
+    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=0)
+    if bbox[2] - bbox[0] > max_width:
+        while text and draw.textbbox((0, 0), text + "…", font=font)[2] - bbox[0] > max_width:
             text = text[:-1]
-        draw.text((left + 2, top + 2), text, fill=(0, 0, 0, 255), font=font)
+        text = (text + "…") if text else "已脱敏"
+    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=1)
+    x = left + max(2, (right - left - (bbox[2] - bbox[0])) // 2)
+    y = top + max(0, (bottom - top - (bbox[3] - bbox[1])) // 2 - bbox[1])
+    sample = image.crop((left, top, right, bottom)).convert("RGB")
+    pixels = list(sample.resize((1, 1)).getdata())
+    luminance = sum(pixels[0]) / 3 if pixels else 255
+    fill = (20, 20, 20, 255) if luminance > 145 else (250, 250, 250, 255)
+    stroke = (250, 250, 250, 230) if luminance > 145 else (20, 20, 20, 230)
+    draw.text((x, y), text, fill=fill, font=font, stroke_width=1, stroke_fill=stroke)
+    return text.endswith("…")
 
 
 def _redact_image(
@@ -1000,29 +1031,29 @@ def _redact_image(
         # copy metadata into the output artifact.
         image = ImageOps.exif_transpose(opened).convert("RGBA")
     reviewed_boxes = list(boxes or [])
-    reviewed_ids = {
-        str(box.get("id"))
-        for box in reviewed_boxes
-        if isinstance(box, dict) and box.get("id")
+    linked_box_ids = {
+        str(value)
+        for entity in entities
+        if isinstance(entity, dict)
+        for value in (entity.get("box_ids", []) or [])
+        if value
     }
-    reviewed_regions = {
-        tuple(round(value, 8) for value in _image_box(box))
-        for box in reviewed_boxes
-        if isinstance(box, dict)
-    }
-    # OCR entities carry the same geometry as their parent OCR line.  When the
-    # reviewed box is present it is the user's authoritative region and image
-    # policy; applying the entity first would turn "keep" or "blur" into the
-    # entity type's default solid mask.  Retain standalone/manual entities.
-    standalone_entities: list[dict] = []
-    for entity in entities:
-        linked_ids = {str(value) for value in entity.get("box_ids", []) if value}
-        linked = bool(linked_ids & reviewed_ids)
-        if not linked and isinstance(entity.get("bbox"), dict):
-            linked = tuple(round(value, 8) for value in _image_box(entity)) in reviewed_regions
-        if not linked:
-            standalone_entities.append(entity)
-    all_boxes = [*standalone_entities, *reviewed_boxes]
+    # Render precise child entities for OCR lines. Parent OCR boxes are only a
+    # fallback when no child entity exists; manual boxes remain independent.
+    standalone_entities = [entity for entity in entities if isinstance(entity, dict)]
+    effective_boxes = []
+    for box in reviewed_boxes:
+        box_id = str(box.get("id", ""))
+        if box_id and box_id in linked_box_ids:
+            continue
+        if not box_id and any(
+            tuple(round(value, 8) for value in _image_box(entity))
+            == tuple(round(value, 8) for value in _image_box(box))
+            for entity in entities if isinstance(entity, dict) and isinstance(entity.get("bbox"), dict)
+        ) and str(box.get("source", "")).lower() != "manual":
+            continue
+        effective_boxes.append(box)
+    all_boxes = [*standalone_entities, *effective_boxes]
     seen_regions: set[tuple[float, float, float, float]] = set()
     for entity in all_boxes:
         # The review payload carries the user's explicit selection for both
@@ -1044,9 +1075,11 @@ def _redact_image(
             continue
         policy = policy_for(str(entity.get("type", "DEFAULT")), policies)
         action = str(policy.get("image_action", "solid"))
+        should_overlay = bool(entity.get("text")) or str(entity.get("type", "")).upper() == "MANUAL"
         if action == "keep":
             continue
         region = image.crop((left, top, right, bottom))
+        replacement = replacement_for(entity, policies, {}) if entity.get("text") else "已脱敏"
         if action == "blur":
             try:
                 radius = max(1, min(80, int(policy.get("blur_radius", 14))))
@@ -1054,7 +1087,6 @@ def _redact_image(
                 radius = 14
             image.alpha_composite(region.filter(ImageFilter.GaussianBlur(radius)), (left, top))
             if policy.get("show_replacement", True):
-                replacement = replacement_for(entity, policies, {})
                 _draw_mask_text(image, (left, top, right, bottom), replacement)
         elif action == "pixelate":
             try:
@@ -1063,10 +1095,16 @@ def _redact_image(
                 factor = 12
             small = region.resize((max(1, region.width // factor), max(1, region.height // factor)), Image.Resampling.BILINEAR)
             image.alpha_composite(small.resize(region.size, Image.Resampling.NEAREST), (left, top))
+            if policy.get("show_replacement", True):
+                _draw_mask_text(image, (left, top, right, bottom), replacement)
         elif action == "text":
-            _draw_mask_text(image, (left, top, right, bottom), str(policy.get("replacement") or "已脱敏"))
+            image.paste(_image_color(policy.get("color", "#ffffff")), (left, top, right, bottom))
+            if policy.get("show_replacement", True) and should_overlay:
+                _draw_mask_text(image, (left, top, right, bottom), replacement)
         else:
             image.paste(_image_color(policy.get("color", "#000000")), (left, top, right, bottom))
+            if policy.get("show_replacement", True) and should_overlay:
+                _draw_mask_text(image, (left, top, right, bottom), replacement)
     output = io.BytesIO()
     ext = extension(filename)
     save_format = {"jpg": "JPEG", "jpeg": "JPEG", "bmp": "BMP", "tif": "TIFF", "tiff": "TIFF", "png": "PNG"}.get(ext, "PNG")

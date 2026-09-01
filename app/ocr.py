@@ -131,6 +131,11 @@ class OCRService:
                 continue
             if not xs or not ys:
                 continue
+            polygon = []
+            try:
+                polygon = [[float(point[0]), float(point[1])] for point in points]
+            except (TypeError, ValueError, IndexError):
+                polygon = []
             boxes.append(
                 {
                     "text": text,
@@ -139,6 +144,7 @@ class OCRService:
                     "y1": min(ys),
                     "x2": max(xs),
                     "y2": max(ys),
+                    "polygon": polygon,
                 }
             )
         return boxes

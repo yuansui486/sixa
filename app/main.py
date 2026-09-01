@@ -847,6 +847,7 @@ class FileMaskIn(BaseModel):
     reversible: bool = False
     password: str | None = Field(default=None, max_length=256)
     boxes: list[dict[str, Any]] | None = Field(default=None, max_length=MAX_IMAGE_BOXES)
+    image_override: bool = False
 
 class BatchMaskIn(BaseModel):
     policies: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=500)
@@ -1016,9 +1017,14 @@ def _map_ocr_result(raw_boxes: list[dict[str, Any]], width: int, height: int, *,
         lines.append(text)
         box_id = uuid.uuid4().hex
         bbox = {'x': left / width, 'y': top / height, 'width': (right - left) / width, 'height': (bottom - top) / height}
+        polygon = raw.get('polygon')
+        if not isinstance(polygon, list) or len(polygon) < 4:
+            polygon = [[left, top], [right, top], [right, bottom], [left, bottom]]
+        else:
+            polygon = [[float(point[0]) / width, float(point[1]) / height] for point in polygon if isinstance(point, (list, tuple)) and len(point) >= 2]
         box = {'id': box_id, 'type': 'OCR', 'text': text, 'score': max(0.0, min(1.0, score)),
                'start': line_start, 'end': line_end, 'bbox': bbox, 'page': page, 'selected': True,
-               'source': 'ocr', 'entity_ids': []}
+               'source': 'ocr', 'entity_ids': [], 'polygon': polygon}
         boxes.append(box)
         if not text:
             continue
@@ -1030,10 +1036,29 @@ def _map_ocr_result(raw_boxes: list[dict[str, Any]], width: int, height: int, *,
         for entity in line_entities:
             entity = dict(entity)
             entity['bbox'] = dict(bbox)
+            entity['line_bbox'] = dict(bbox)
+            entity['line_polygon'] = list(polygon)
+            entity['char_start'] = int(entity.get('start', 0))
+            entity['char_end'] = int(entity.get('end', 0))
             entity['page'] = page
             entity['box_ids'] = [box_id]
             entity['start'] = line_start + int(entity.get('start', 0))
             entity['end'] = line_start + int(entity.get('end', 0))
+            local_start = max(0, min(len(text), int(entity['char_start'])))
+            local_end = max(local_start, min(len(text), int(entity['char_end'])))
+            if local_end > local_start and text:
+                # Estimate a precise horizontal sub-region from character advances.
+                # PaddleOCR exposes line geometry but not per-character boxes.
+                advances = [1.0 if ord(ch) > 0x7f else 0.58 for ch in text]
+                total = max(sum(advances), 1.0)
+                start_ratio = sum(advances[:local_start]) / total
+                end_ratio = sum(advances[:local_end]) / total
+                entity['bbox'] = {
+                    'x': bbox['x'] + bbox['width'] * start_ratio,
+                    'y': bbox['y'],
+                    'width': max(0.001, bbox['width'] * (end_ratio - start_ratio)),
+                    'height': bbox['height'],
+                }
             entity['id'] = str(entity.get('id') or uuid.uuid4().hex)
             box['entity_ids'].append(entity['id'])
             entities.append(entity)
@@ -1575,6 +1600,8 @@ def files_mask(value: FileMaskIn):
     if file_ext == 'pdf':
         _require_complete_pdf_review(manifest, boxes)
     request_policies = _validate_policy_map(value.policies)
+    if file_ext in IMAGE_EXTENSIONS and not value.image_override:
+        request_policies = {}
     try:
         masked = mask_file(data, server_filename, server_text, entities, request_policies or policy_store, boxes)
     except ValueError as exc:

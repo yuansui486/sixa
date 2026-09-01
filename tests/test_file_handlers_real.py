@@ -20,7 +20,7 @@ from docx.shared import RGBColor
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from openpyxl.workbook.defined_name import DefinedName
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 from app.file_handlers import (
     _redact_image,
@@ -369,3 +369,22 @@ def test_image_keep_policy_does_not_modify_region() -> None:
     raw = source.getvalue()
     masked = _redact_image(raw, [], "fixture.png", {"DEFAULT": {"image_action": "keep"}}, [{"x": 0, "y": 0, "width": 0.5, "height": 0.5}])
     assert ImageChops.difference(image, Image.open(io.BytesIO(masked)).convert("RGB")).getbbox() is None
+
+
+def test_image_entity_replacement_is_local_and_uses_text_policy() -> None:
+    image = Image.new("RGB", (420, 90), "white")
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 28)
+    draw.text((12, 28), "联系电话：13800138000", font=font, fill="black")
+    source = io.BytesIO(); image.save(source, "PNG")
+    masked = _redact_image(
+        source.getvalue(),
+        [{"type": "PHONE", "text": "13800138000", "start": 6, "end": 17,
+          "bbox": {"x": 0.43, "y": 0.25, "width": 0.42, "height": 0.42}, "selected": True}],
+        "fixture.png", {}, [],
+    )
+    result = Image.open(io.BytesIO(masked)).convert("RGB")
+    # The replacement must be visible in the sensitive region while the far
+    # left, non-sensitive label remains pixel-identical.
+    assert ImageChops.difference(image.crop((0, 0, 150, 90)), result.crop((0, 0, 150, 90))).getbbox() is None
+    assert ImageChops.difference(image.crop((175, 15, 390, 80)), result.crop((175, 15, 390, 80))).getbbox() is not None

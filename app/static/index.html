@@ -65,9 +65,7 @@
       <div class="panel"><h2>图片脱敏</h2>
         <div class="drop"><label for="imageFile">选择图片（PNG、JPEG、BMP、TIFF）</label><br><input type="file" id="imageFile" accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,image/png,image/jpeg,image/bmp,image/tiff"><div id="imageFileName" class="file-name"></div>
           <button type="button" id="imageAnalyzeBtn">上传并分析</button><button type="button" id="imageMaskBtn" disabled>执行脱敏</button><button type="button" class="secondary" id="imageClearManualBtn" disabled>清除手工框</button></div>
-        <div class="field"><label for="imageAction">图片策略</label><select id="imageAction"><option value="blur">模糊</option><option value="pixelate">像素化</option><option value="solid">纯色遮盖</option><option value="text">文字遮盖</option><option value="keep">保留</option></select>
-          <label for="imageColor">遮盖颜色</label><input id="imageColor" type="color" value="#000000" title="遮盖颜色"><label for="imageReplacement">文字</label><input id="imageReplacement" value="已脱敏" maxlength="32" size="8"><label for="blur">模糊半径</label><input id="blur" type="number" value="14" min="1" max="80" step="1" size="4">
-          <label><input id="imageDrawMode" type="checkbox"> 启用手工框选</label></div>
+        <div class="field"><span class="hint">图片默认使用“策略”页中各实体的处理方式，并写入替换文字。</span><label><input id="imageDrawMode" type="checkbox"> 启用手工框选</label><input id="imageAction" type="hidden" value="blur"><input id="imageColor" type="hidden" value="#000000"><input id="imageReplacement" type="hidden" value="已脱敏"><input id="blur" type="hidden" value="16"></div>
         <div class="canvas-wrap"><canvas id="imageCanvas" width="1" height="1" aria-label="图片预览与脱敏区域"></canvas></div><div id="imageBoxes" class="muted">选择图片后开始分析；也可以启用手工框选。</div><div id="imageMessage" role="status" aria-live="polite"></div><div id="imageResult" class="result-links"></div>
       </div>
     </section>
