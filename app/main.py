@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import mimetypes
 import os
 import re
 import shutil
@@ -111,6 +112,13 @@ def conn():
         if name not in columns:
             c.execute(f'ALTER TABLE tasks ADD COLUMN {name} {definition}')
     c.execute('CREATE TABLE IF NOT EXISTS rules(id TEXT PRIMARY KEY,name TEXT,kind TEXT,pattern TEXT,entity_type TEXT,replacement TEXT,enabled INTEGER DEFAULT 1)')
+    # Keep the legacy seven-column rule table stable for existing local
+    # installations and integrations. New presentation fields live in a
+    # one-to-one side table so old INSERT statements remain compatible.
+    c.execute('''CREATE TABLE IF NOT EXISTS rule_metadata(
+        rule_id TEXT PRIMARY KEY, category TEXT DEFAULT '自定义规则',
+        scope TEXT DEFAULT 'all', created REAL DEFAULT 0, updated REAL DEFAULT 0,
+        FOREIGN KEY(rule_id) REFERENCES rules(id) ON DELETE CASCADE)''')
     c.execute('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
     c.execute('''CREATE TABLE IF NOT EXISTS batches(
         id TEXT PRIMARY KEY, created REAL NOT NULL, updated REAL NOT NULL,
@@ -307,6 +315,25 @@ def cleanup(*, force: bool = True) -> None:
                     and path.stat().st_mtime < cutoff
                 ):
                     shutil.rmtree(path, ignore_errors=True)
+                    continue
+                # Preview files are intentionally short-lived and may expire
+                # long before the parent task TTL. Remove only the controlled
+                # ``.previews`` directory; source and analysis stay intact.
+                preview_dir = path / '.previews' if path.is_dir() else None
+                if preview_dir and preview_dir.is_dir():
+                    for preview_meta in preview_dir.glob('*.json'):
+                        try:
+                            payload = json.loads(preview_meta.read_text(encoding='utf-8'))
+                            expired = float(payload.get('expires', 0)) < now if isinstance(payload, dict) else True
+                        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                            expired = True
+                        if expired:
+                            preview_id = preview_meta.stem
+                            preview_meta.unlink(missing_ok=True)
+                            for output in preview_dir.glob(f'{preview_id}.*'):
+                                output.unlink(missing_ok=True)
+                    if not any(preview_dir.iterdir()):
+                        preview_dir.rmdir()
             except OSError:
                 continue
         _last_cleanup = now
@@ -344,6 +371,99 @@ ENTITY_CATALOG = {
     'DATE_TIME':'日期时间','MONEY':'金额','LICENSE_PLATE':'车牌号','WECHAT_ID':'微信号','QQ_NUMBER':'数字账号/编号',
     'POSTAL_CODE':'邮政编码','PASSPORT':'护照号','MAC_ADDRESS':'设备地址','URL':'网页地址',
 }
+ENTITY_DESCRIPTIONS = {
+    'PERSON': ('个人姓名', '张三', '姓名、人名等个人身份信息'),
+    'ORGANIZATION': ('组织机构', '北京大学', '公司、学校、政府机构等名称'),
+    'LOCATION': ('地点', '北京市海淀区', '城市、区域和其他地理位置'),
+    'GPE': ('国家/地区', '中国', '国家、地区或行政区划'),
+    'ADDRESS': ('详细地址', '北京市海淀区中关村大街 1 号', '街道、门牌等详细地址'),
+    'PHONE': ('电话号码', '13800138000', '手机、座机和带区号的电话号码'),
+    'ID_CARD': ('身份证号', '11010519491231002X', '居民身份证号码'),
+    'BANK_CARD': ('银行卡号', '622202********1234', '银行卡、支付卡号码'),
+    'EMAIL': ('电子邮箱', 'name@example.com', '电子邮件地址'),
+    'IP_ADDRESS': ('IP 地址', '192.168.1.1', 'IPv4 网络地址'),
+    'DATE_TIME': ('日期时间', '2026 年 9 月 2 日', '日期、时间和时间范围'),
+    'MONEY': ('金额', '人民币 10,000 元', '金额、货币数值和价格'),
+    'LICENSE_PLATE': ('车牌号', '京 A12345', '机动车号牌'),
+    'WECHAT_ID': ('微信号', 'zhangsan_01', '微信账号标识'),
+    'QQ_NUMBER': ('数字账号/编号', '12345678', 'QQ 号及语境中的数字账号或编号'),
+    'POSTAL_CODE': ('邮政编码', '100080', '六位邮政编码'),
+    'PASSPORT': ('护照号', 'E12345678', '护照及旅行证件号码'),
+    'MAC_ADDRESS': ('设备地址', '00:1A:2B:3C:4D:5E', '网卡 MAC 地址'),
+    'URL': ('网页地址', 'https://example.com', '网页链接和 URL'),
+    'CUSTOM': ('自定义敏感信息', '客户代号-ABC', '用户创建的固定词或正则规则'),
+    'DEFAULT': ('其他敏感信息', '待脱敏内容', '未归类的敏感信息'),
+}
+
+
+def _entity_catalog_items() -> list[dict[str, Any]]:
+    """Return one stable, localized entity directory for all clients."""
+    items: list[dict[str, Any]] = []
+    known = set(ENTITY_CATALOG)
+    for code, name in ENTITY_CATALOG.items():
+        display, example, description = ENTITY_DESCRIPTIONS.get(code, (name, '', ''))
+        items.append({
+            'code': code,
+            'type': code,
+            'name': display,
+            'label': display,
+            'description': description,
+            'example': example,
+            'builtin': True,
+            'category_mode': code in {'PERSON', 'ORGANIZATION', 'LOCATION', 'GPE', 'PHONE', 'EMAIL', 'ADDRESS'},
+            'source': '内置规则' if code in {typ for typ, _, _ in PATTERNS} else '中文模型',
+        })
+    # Custom entity types are useful in the rule editor and should be shown in
+    # the same directory without leaking any matching values.
+    try:
+        c = conn()
+        rows = c.execute('SELECT DISTINCT entity_type,name FROM rules WHERE entity_type IS NOT NULL AND entity_type != ""').fetchall()
+        c.close()
+    except sqlite3.Error:
+        rows = []
+    for raw_code, raw_name in rows:
+        code = str(raw_code)
+        if code in known:
+            continue
+        display = str(raw_name or code)
+        items.append({'code': code, 'type': code, 'name': display, 'label': display,
+                      'description': '用户自定义实体类型', 'example': '', 'builtin': False,
+                      'category_mode': False})
+        known.add(code)
+    # Compatibility/display-only types used by OCR, legacy clients and the
+    # custom-rule editor. They are not additional recognizers by themselves.
+    compatibility = {
+        'CUSTOM': ('自定义敏感信息', '用户创建的固定词或正则规则'),
+        'DEFAULT': ('其他敏感信息', '未归类的敏感信息'),
+        'OCR': ('图片文字区域', 'OCR 识别出的文字区域'),
+        'MANUAL': ('手工选择区域', '用户在图片或 PDF 上手工框选的区域'),
+        'PHONE_NUMBER': ('电话号码', '旧版电话号码类型'),
+        'EMAIL_ADDRESS': ('电子邮箱', '旧版电子邮箱类型'),
+    }
+    for code, (name, description) in compatibility.items():
+        if code in known:
+            continue
+        items.append({'code': code, 'type': code, 'name': name, 'label': name,
+                      'description': description, 'example': '', 'builtin': code not in {'CUSTOM'},
+                      'category_mode': code in {'PHONE_NUMBER', 'EMAIL_ADDRESS'}})
+        known.add(code)
+    return items
+
+
+def _public_metadata(value: Any) -> dict[str, Any]:
+    """Expose only non-content task metadata to history consumers."""
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        'manifest_version', 'source_retained', 'preview_count', 'parent_id',
+        'file_count', 'kind', 'display_name', 'created_by',
+    }
+    result: dict[str, Any] = {}
+    for key in allowed:
+        item = value.get(key)
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            result[key] = item
+    return result
 BUILTIN_RULES = {typ:{'id':typ.lower(), 'name':ENTITY_CATALOG.get(typ,typ), 'entity_type':typ,
                        'kind':'内置规则', 'description':'系统内置敏感信息识别', 'editable':False}
                  for typ, _, _ in PATTERNS}
@@ -354,6 +474,83 @@ def _rule_settings():
     return value if isinstance(value,dict) else {}
 def _save_rule_settings(value):
     c=conn(); c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',('builtin_rules',json.dumps(value,ensure_ascii=False))); c.commit(); c.close()
+
+
+def _rule_metadata(rule_id: str, *, category: str = '自定义规则', scope: str = 'all',
+                   created: float | None = None, updated: float | None = None) -> None:
+    """Persist optional rule presentation fields without breaking old DBs."""
+    now = datetime.now().timestamp()
+    created = now if created is None else float(created)
+    updated = now if updated is None else float(updated)
+    category = str(category or '自定义规则')[:80]
+    scope = str(scope or 'all') if str(scope or 'all') in {'all', 'text', 'image', 'document'} else 'all'
+    c = conn()
+    c.execute('''INSERT INTO rule_metadata(rule_id,category,scope,created,updated)
+                 VALUES(?,?,?,?,?)
+                 ON CONFLICT(rule_id) DO UPDATE SET category=excluded.category,
+                 scope=excluded.scope,updated=excluded.updated''',
+              (rule_id, category, scope, created, updated))
+    c.commit(); c.close()
+
+
+def _rule_rows(*, category: str | None = None, scope: str | None = None,
+               query: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    values: list[Any] = []
+    if category:
+        clauses.append('COALESCE(m.category, ?) = ?'); values.extend(['自定义规则', category])
+    if scope and scope != 'all':
+        clauses.append('COALESCE(m.scope, "all") IN ("all", ?)'); values.append(scope)
+    if query:
+        needle = f'%{query}%'; clauses.append('(r.name LIKE ? OR r.pattern LIKE ? OR r.entity_type LIKE ?)'); values.extend([needle, needle, needle])
+    where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    c = conn()
+    rows = c.execute(f'''SELECT r.id,r.name,r.kind,r.pattern,r.entity_type,r.replacement,r.enabled,
+                                COALESCE(m.category,'自定义规则'),COALESCE(m.scope,'all'),
+                                COALESCE(m.created,0),COALESCE(m.updated,0)
+                         FROM rules r LEFT JOIN rule_metadata m ON m.rule_id=r.id{where}
+                         ORDER BY COALESCE(m.updated,0) DESC,r.name COLLATE NOCASE''', values).fetchall()
+    c.close()
+    keys = ('id','name','kind','pattern','entity_type','replacement','enabled','category','scope','created','updated')
+    return [dict(zip(keys, row)) for row in rows]
+
+
+_BUILTIN_RULE_CATEGORIES = ('系统内置', '用户自定义', '自定义规则')
+
+
+def _stored_rule_categories() -> list[str]:
+    c = conn()
+    row = c.execute('SELECT value FROM settings WHERE key=?', ('rule_categories',)).fetchone()
+    c.close()
+    try:
+        values = json.loads(row[0]) if row else []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        values = []
+    if not isinstance(values, list):
+        values = []
+    result = [str(item).strip()[:80] for item in values if str(item).strip()]
+    return list(dict.fromkeys(result))
+
+
+def _save_rule_categories(values: list[str]) -> None:
+    clean = list(dict.fromkeys(str(item).strip()[:80] for item in values if str(item).strip()))
+    c = conn()
+    c.execute('''INSERT INTO settings(key,value) VALUES(?,?)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value''',
+              ('rule_categories', json.dumps(clean, ensure_ascii=False)))
+    c.commit(); c.close()
+
+
+def _rule_category_payload() -> list[dict[str, Any]]:
+    rows = _rule_rows()
+    counts: dict[str, int] = {}
+    for row in rows:
+        category = str(row.get('category') or '自定义规则')
+        counts[category] = counts.get(category, 0) + 1
+    names = list(_BUILTIN_RULE_CATEGORIES) + _stored_rule_categories()
+    names.extend(counts)
+    return [{'id': name, 'name': name, 'builtin': name in _BUILTIN_RULE_CATEGORIES,
+             'count': counts.get(name, 0)} for name in dict.fromkeys(names)]
 def analyze(text):
     c=conn(); custom=c.execute('SELECT name,kind,pattern,entity_type,replacement FROM rules WHERE enabled=1').fetchall(); c.close(); found=[]; settings=_rule_settings()
     for typ,pat,check in PATTERNS:
@@ -429,17 +626,24 @@ def register_task(task_id, kind, original='', masked='', *, source_path='', arti
     c.commit(); c.close(); return task_id
 
 def update_task(task_id, masked='', *, status='completed', artifact_name=None,
-                source_path=None, reversible=None, error=''):
+                source_path=None, reversible=None, error='', restored_name=None):
     if not _valid_task_id(task_id):
         raise ValueError('invalid task id')
     c=conn(); fields=['masked=?','status=?','updated=?','error=?']; values=[masked or '',status,datetime.now().timestamp(),error or '']
     if artifact_name is not None: fields.append('artifact_name=?'); values.append(artifact_name)
     if source_path is not None: fields.append('source_path=?'); values.append(source_path)
     if reversible is not None: fields.append('reversible=?'); values.append(int(bool(reversible)))
+    if restored_name is not None: fields.append('restored_name=?'); values.append(restored_name)
     values.append(task_id); c.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE id=?", values); c.commit(); c.close()
 
-def store(original,masked,kind='text'):
+def store(original,masked,kind='text', entities: list[dict[str, Any]] | None = None):
     i=uuid.uuid4().hex; d=_task_path(i, create=True); (d/'original.txt').write_text(original,encoding='utf-8'); (d/'masked.txt').write_text(masked,encoding='utf-8')
+    snapshot = {
+        'filename': 'text.txt', 'kind': kind, 'text': original,
+        'entities': [dict(item) for item in (entities or []) if isinstance(item, dict)],
+        'boxes': [], 'warnings': [], 'sha256': _sha256(original.encode('utf-8')),
+    }
+    (d / 'analysis.json').write_text(json.dumps(snapshot, ensure_ascii=False), encoding='utf-8')
     register_task(i, kind, source_path='original.txt', artifact_name='masked.txt',
                   original_name='text.txt', source_sha256=_sha256(original.encode('utf-8')),
                   status='completed', metadata={'legacy_text': True})
@@ -460,6 +664,27 @@ class RuleIn(BaseModel):
     pattern: str = Field(min_length=1, max_length=10_000)
     entity_type: str = Field(default='CUSTOM', min_length=1, max_length=80)
     replacement: str = Field(default='__MASKED_CUSTOM__', max_length=500)
+    category: str = Field(default='自定义规则', min_length=1, max_length=80)
+    scope: str = Field(default='all', pattern='^(all|text|image|document)$')
+
+
+class RulePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    kind: str | None = None
+    pattern: str | None = Field(default=None, min_length=1, max_length=10_000)
+    entity_type: str | None = Field(default=None, min_length=1, max_length=80)
+    replacement: str | None = Field(default=None, max_length=500)
+    category: str | None = Field(default=None, min_length=1, max_length=80)
+    scope: str | None = Field(default=None, pattern='^(all|text|image|document)$')
+    enabled: bool | None = None
+
+
+class RuleCategoryIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class RuleCategoryPatch(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
 class CustomSensitiveIn(BaseModel):
     mode: str = Field(default='literal', pattern='^(literal|category)$')
     value: str = Field(min_length=1, max_length=10_000)
@@ -548,7 +773,9 @@ async def housekeeping(request,call_next):
     _load_policy_store()
     cleanup(force=False)
     path = request.url.path
-    if not _TEST_MODE and path.startswith('/api/') and (path.endswith('/analyze') or path.endswith('/mask')) and not models_ready():
+    if not _TEST_MODE and path.startswith('/api/') and (
+        path.endswith('/analyze') or path.endswith('/mask') or path == '/api/files/preview'
+    ) and not models_ready():
         return _model_gate_response()
     return await call_next(request)
 @app.get('/api/health')
@@ -602,13 +829,14 @@ def initialize():
     threading.Thread(target=run,daemon=True).start(); return {'job_id':i}
 @app.get('/api/models/jobs/{job_id}')
 def model_job(job_id): return jobs.get(job_id,{'status':'not_found'})
+
 @app.post('/api/text/analyze')
 def text_analyze(v:TextIn): return {'analysis_id':uuid.uuid4().hex,'text':v.text,'entities':analyze(v.text)}
 @app.post('/api/text/mask')
 def text_mask(v:MaskIn):
     _load_policy_store()
     masked=apply_mask(v.text,v.entities,policy_store)
-    return {'task_id':store(v.text,masked),'masked_text':masked}
+    return {'task_id':store(v.text,masked,entities=v.entities),'masked_text':masked}
 @app.post('/api/text/unmask')
 def text_unmask(v:RestoreIn):
     if not _valid_task_id(v.task_id): raise HTTPException(404,'task not found')
@@ -630,6 +858,8 @@ def list_tasks(
     offset: int = Query(default=0, ge=0),
     status: str | None = Query(default=None, max_length=32),
     kind: str | None = Query(default=None, max_length=32),
+    q: str | None = Query(default=None, max_length=120),
+    parent_only: bool = Query(default=False),
 ):
     clauses: list[str] = []
     values: list[Any] = []
@@ -637,30 +867,127 @@ def list_tasks(
         clauses.append('status=?'); values.append(status)
     if kind:
         clauses.append('kind=?'); values.append(kind)
+    if q and q.strip():
+        needle = f'%{q.strip()}%'
+        clauses.append('(original_name LIKE ? OR error LIKE ? OR kind LIKE ?)')
+        values.extend([needle, needle, needle])
+    if parent_only:
+        # Show standalone files plus batch parents, hiding batch children from
+        # the primary file-center view.
+        clauses.append('(is_parent=1 OR COALESCE(batch_id, "")="")')
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ''
     # Batch archives are durable artifacts too. Include their parent records in
     # the same history feed so a browser refresh does not make a completed ZIP
     # impossible to find. Child file tasks remain independently downloadable.
     history_sql = '''
         SELECT id,created,kind,original_name,status,artifact_name,restored_name,
-               source_sha256,reversible,batch_id,error
+               source_sha256,reversible,batch_id,error,metadata_json,source_path,0 AS is_parent
         FROM tasks
         UNION ALL
         SELECT id,created,'batch',printf('批量任务（%d 个文件）',total),status,
-               archive_name,'','',0,id,error
+               archive_name,'','',0,'',error,metadata_json,'' AS source_path,1 AS is_parent
         FROM batches
     '''
     c=conn()
     total = int(c.execute(f'SELECT COUNT(*) FROM ({history_sql}) AS history{where}', values).fetchone()[0])
     rows=c.execute(
         f'''SELECT id,created,kind,original_name,status,artifact_name,restored_name,
-                   source_sha256,reversible,batch_id,error
+                   source_sha256,reversible,batch_id,error,metadata_json,source_path,is_parent
             FROM ({history_sql}) AS history{where}
             ORDER BY created DESC LIMIT ? OFFSET ?''',
         [*values, limit, offset],
     ).fetchall(); c.close()
-    keys=('id','created','kind','filename','status','artifact','restored_artifact','sha256','reversible','batch_id','error')
-    return {'tasks':[dict(zip(keys,r)) for r in rows], 'total': total, 'limit': limit, 'offset': offset}
+    keys=('id','created','kind','filename','status','artifact','restored_artifact','sha256','reversible','batch_id','error','metadata_json','source_path','is_parent')
+    tasks: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(zip(keys, row))
+        task_id = str(item['id'])
+        try:
+            metadata = json.loads(str(item.pop('metadata_json') or '{}'))
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        source_path = str(item.pop('source_path') or '')
+        folder = TASKS / task_id
+        item['metadata'] = _public_metadata(metadata)
+        item['parent'] = bool(item.pop('is_parent'))
+        item['has_source'] = bool(source_path and (folder / source_path).is_file())
+        item['has_analysis'] = (folder / 'analysis.json').is_file()
+        item['has_preview'] = any((folder / '.previews').glob('*.*')) if (folder / '.previews').is_dir() else False
+        tasks.append(item)
+    return {'tasks':tasks, 'total': total, 'limit': limit, 'offset': offset}
+
+
+@app.get('/api/entities')
+def entity_directory():
+    return {'entities': _entity_catalog_items(), 'entity_catalog': ENTITY_CATALOG,
+            'defaults_version': POLICY_VERSION}
+
+
+def _task_record(task_id: str) -> tuple[Any, ...]:
+    if not _valid_task_id(task_id):
+        raise HTTPException(404, 'task not found')
+    c = conn()
+    row = c.execute('''SELECT original_name,kind,status,artifact_name,restored_name,
+                              source_sha256,reversible,batch_id,metadata_json,source_path
+                       FROM tasks WHERE id=?''', (task_id,)).fetchone()
+    c.close()
+    if not row:
+        raise HTTPException(404, 'task not found')
+    return row
+
+
+@app.get('/api/tasks/{task_id}/analysis')
+def task_analysis(task_id: str):
+    row = _task_record(task_id)
+    payload = dict(_analysis_payload(task_id))
+    try:
+        metadata = json.loads(str(row[8] or '{}'))
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    filename = _safe_filename(str(row[0] or payload.get('filename') or 'upload.bin'))
+    payload.update({
+        'analysis_id': task_id,
+        'filename': filename,
+        'extension': extension(filename),
+        'task_kind': str(row[1] or ''),
+        'status': str(row[2] or ''),
+        'artifact': (f'/api/tasks/{task_id}/artifacts/{Path(str(row[3])).name}' if row[3] else None),
+        'restored_artifact': (f'/api/tasks/{task_id}/artifacts/{Path(str(row[4])).name}' if row[4] else None),
+        'reversible': bool(row[6]),
+        'batch_id': str(row[7] or ''),
+        'metadata': metadata,
+        'source_preview': f'/api/tasks/{task_id}/source-preview' if row[9] else None,
+    })
+    return payload
+
+
+_SOURCE_MEDIA_TYPES = {
+    'txt': 'text/plain; charset=utf-8', 'md': 'text/markdown; charset=utf-8',
+    'pdf': 'application/pdf', 'png': 'image/png', 'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg', 'bmp': 'image/bmp', 'tif': 'image/tiff', 'tiff': 'image/tiff',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'xlsm': 'application/vnd.ms-excel.sheet.macroEnabled.12',
+}
+
+
+@app.get('/api/tasks/{task_id}/source-preview')
+def source_preview(task_id: str):
+    row = _task_record(task_id)
+    filename = _safe_filename(str(row[0] or 'source.bin'))
+    source_name = Path(str(row[9] or 'source.bin')).name
+    if source_name != str(row[9] or 'source.bin'):
+        raise HTTPException(404, 'source not found')
+    path = (_task_path(task_id) / source_name).resolve()
+    if path.parent != _task_path(task_id).resolve() or not path.is_file():
+        raise HTTPException(404, 'source not found')
+    media_type = _SOURCE_MEDIA_TYPES.get(extension(filename)) or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    return FileResponse(path, filename=filename, media_type=media_type,
+                        content_disposition_type='inline')
 @app.delete('/api/tasks/{task_id}')
 def delete_task(task_id):
     folder = _task_path(task_id)
@@ -733,10 +1060,20 @@ def artifact(task_id,name):
     if p == base or base not in p.parents or not p.is_file(): raise HTTPException(404,'artifact not found')
     return FileResponse(p, filename=name, content_disposition_type='attachment')
 @app.get('/api/rules')
-def rules():
-    c=conn(); rows=c.execute('SELECT id,name,kind,pattern,entity_type,replacement,enabled FROM rules').fetchall(); c.close(); keys=('id','name','kind','pattern','entity_type','replacement','enabled'); settings=_rule_settings(); builtin=[]
-    for typ, meta in BUILTIN_RULES.items(): builtin.append({**meta, 'enabled': settings.get(typ.lower(), True)})
-    return {'rules':[dict(zip(keys,r)) for r in rows], 'builtin_rules':builtin, 'ner_enabled':settings.get('ner_enabled',True), 'entity_catalog':ENTITY_CATALOG}
+def rules(category: str | None = Query(default=None, max_length=80),
+          scope: str | None = Query(default=None, pattern='^(all|text|image|document)$'),
+          q: str | None = Query(default=None, max_length=120)):
+    custom = _rule_rows(category=category, scope=scope, query=q)
+    settings = _rule_settings()
+    builtin = []
+    for typ, meta in BUILTIN_RULES.items():
+        item = {**meta, 'code': typ, 'category': '系统内置', 'scope': 'all',
+                'enabled': settings.get(typ.lower(), True)}
+        builtin.append(item)
+    categories = sorted({'系统内置', '自定义规则'} | {str(item.get('category') or '自定义规则') for item in custom})
+    return {'rules': custom, 'builtin_rules': builtin, 'categories': categories,
+            'ner_enabled': settings.get('ner_enabled', True),
+            'entity_catalog': ENTITY_CATALOG, 'entities': _entity_catalog_items()}
 @app.patch('/api/rules/builtin/{rule_id}')
 def toggle_builtin(rule_id: str, value: dict[str, bool]):
     typ=next((t for t,m in BUILTIN_RULES.items() if m['id']==rule_id), None)
@@ -753,21 +1090,114 @@ def add_rule(v:RuleIn):
     if v.kind=='regex':
         try: re.compile(v.pattern)
         except re.error as e: raise HTTPException(422,f'invalid regex: {e}')
-    i=uuid.uuid4().hex; c=conn(); c.execute('INSERT INTO rules VALUES(?,?,?,?,?,?,1)',(i,v.name,v.kind,v.pattern,v.entity_type,v.replacement)); c.commit(); c.close(); return {'id':i}
+    i=uuid.uuid4().hex; now = datetime.now().timestamp()
+    c=conn(); c.execute('INSERT INTO rules VALUES(?,?,?,?,?,?,1)',(i,v.name,v.kind,v.pattern,v.entity_type,v.replacement)); c.commit(); c.close()
+    _rule_metadata(i, category=v.category, scope=v.scope, created=now, updated=now)
+    return {'id':i, 'category':v.category, 'scope':v.scope}
+
+
+@app.patch('/api/rules/{rule_id}')
+def update_rule(rule_id: str, value: RulePatch):
+    c = conn()
+    row = c.execute('SELECT name,kind,pattern,entity_type,replacement,enabled FROM rules WHERE id=?', (rule_id,)).fetchone()
+    if not row:
+        c.close(); raise HTTPException(404, '自定义规则不存在')
+    name, kind, pattern, entity_type, replacement, enabled = row
+    updates = {
+        'name': value.name if value.name is not None else name,
+        'kind': value.kind if value.kind is not None else kind,
+        'pattern': value.pattern if value.pattern is not None else pattern,
+        'entity_type': value.entity_type if value.entity_type is not None else entity_type,
+        'replacement': value.replacement if value.replacement is not None else replacement,
+        'enabled': int(value.enabled) if value.enabled is not None else enabled,
+    }
+    if updates['kind'] not in {'word', 'regex', 'literal', 'category'}:
+        c.close(); raise HTTPException(422, '规则类型不受支持')
+    if updates['kind'] == 'regex':
+        try: re.compile(str(updates['pattern']))
+        except re.error as exc:
+            c.close(); raise HTTPException(422, f'正则表达式无效: {exc}') from exc
+    c.execute('UPDATE rules SET name=?,kind=?,pattern=?,entity_type=?,replacement=?,enabled=? WHERE id=?',
+              (updates['name'], updates['kind'], updates['pattern'], updates['entity_type'], updates['replacement'], updates['enabled'], rule_id))
+    c.commit(); c.close()
+    metadata = _rule_rows(query=None)
+    current = next((item for item in metadata if item['id'] == rule_id), None)
+    category = value.category if value.category is not None else (current or {}).get('category', '自定义规则')
+    scope = value.scope if value.scope is not None else (current or {}).get('scope', 'all')
+    _rule_metadata(rule_id, category=category, scope=scope, updated=datetime.now().timestamp())
+    return {'id': rule_id, **updates, 'category': category, 'scope': scope}
+
+
+@app.get('/api/rule-categories')
+def list_rule_categories():
+    return {'categories': _rule_category_payload()}
+
+
+@app.post('/api/rule-categories')
+def add_rule_category(value: RuleCategoryIn):
+    name = value.name.strip()
+    if name in _BUILTIN_RULE_CATEGORIES or any(item['name'] == name for item in _rule_category_payload()):
+        raise HTTPException(409, '规则分类已存在')
+    categories = _stored_rule_categories(); categories.append(name); _save_rule_categories(categories)
+    return {'id': name, 'name': name, 'builtin': False, 'count': 0}
+
+
+@app.patch('/api/rule-categories/{category_id}')
+def rename_rule_category(category_id: str, value: RuleCategoryPatch):
+    old = str(category_id)
+    # Starlette decodes path parameters, but also accept the common URL-encoded
+    # form if a client sends it literally.
+    from urllib.parse import unquote
+    old = unquote(old)
+    if old in _BUILTIN_RULE_CATEGORIES:
+        raise HTTPException(409, '内置分类不可重命名')
+    new = value.name.strip()
+    if not new:
+        raise HTTPException(422, '分类名称不能为空')
+    if new in _BUILTIN_RULE_CATEGORIES or any(item['name'] == new for item in _rule_category_payload() if item['name'] != old):
+        raise HTTPException(409, '规则分类已存在')
+    c = conn(); c.execute('UPDATE rule_metadata SET category=? WHERE category=?', (new, old)); c.commit(); c.close()
+    categories = [new if item == old else item for item in _stored_rule_categories()]
+    _save_rule_categories(categories)
+    if not any(item['name'] == new for item in _rule_category_payload()):
+        raise HTTPException(404, '规则分类不存在')
+    return {'id': new, 'name': new, 'builtin': False}
+
+
+@app.delete('/api/rule-categories/{category_id}')
+def delete_rule_category(category_id: str):
+    from urllib.parse import unquote
+    name = unquote(str(category_id))
+    if name in _BUILTIN_RULE_CATEGORIES:
+        raise HTTPException(409, '内置分类不可删除')
+    existing = any(item['name'] == name for item in _rule_category_payload())
+    if not existing:
+        raise HTTPException(404, '规则分类不存在')
+    c = conn(); c.execute('UPDATE rule_metadata SET category=? WHERE category=?', ('自定义规则', name)); c.commit(); c.close()
+    _save_rule_categories([item for item in _stored_rule_categories() if item != name])
+    return {'deleted': name, 'moved_rules': True}
+
+
 @app.delete('/api/rules/{rule_id}')
 def remove_rule(rule_id):
-    c=conn(); c.execute('DELETE FROM rules WHERE id=?',(rule_id,)); c.commit(); c.close(); return {'deleted':rule_id}
+    if rule_id in {meta['id'] for meta in BUILTIN_RULES.values()}:
+        raise HTTPException(409, '内置规则不可删除，请使用启用开关')
+    c=conn(); cur = c.execute('DELETE FROM rules WHERE id=?',(rule_id,)); c.execute('DELETE FROM rule_metadata WHERE rule_id=?',(rule_id,)); c.commit(); c.close()
+    if not cur.rowcount:
+        raise HTTPException(404, '自定义规则不存在')
+    return {'deleted':rule_id}
 
 @app.get('/api/custom-sensitive')
 def list_custom_sensitive():
-    c=conn(); rows=c.execute("SELECT id,name,kind,pattern,entity_type,replacement,enabled FROM rules WHERE kind IN ('word','literal','category')").fetchall(); c.close()
-    keys=('id','name','kind','pattern','entity_type','replacement','enabled')
-    return {'items':[{**dict(zip(keys,row)), 'mode':('category' if row[2]=='category' else 'literal'), 'value':row[3]} for row in rows]}
+    rows = _rule_rows()
+    return {'items':[{**row, 'mode':('category' if row['kind']=='category' else 'literal'), 'value':row['pattern']}
+                     for row in rows if row['kind'] in {'word','literal','category'}]}
 
 @app.post('/api/custom-sensitive')
 def add_custom_sensitive(v: CustomSensitiveIn):
     i=uuid.uuid4().hex; kind='literal' if v.mode=='literal' else 'category'; c=conn()
     c.execute('INSERT INTO rules VALUES(?,?,?,?,?,?,?)',(i,v.name or v.value,kind,v.value,v.entity_type,v.replacement,int(v.enabled))); c.commit(); c.close()
+    _rule_metadata(i, category='用户自定义', scope='all')
     if v.mode == 'category':
         _load_policy_store()
         base = dict(policy_store.get(v.entity_type, DEFAULT_POLICIES.get(v.entity_type, DEFAULT_POLICIES['DEFAULT'])))
@@ -786,12 +1216,16 @@ def add_custom_sensitive(v: CustomSensitiveIn):
 def update_custom_sensitive(rule_id: str, v: CustomSensitiveIn):
     c=conn(); kind='literal' if v.mode=='literal' else 'category'; cur=c.execute('UPDATE rules SET name=?,kind=?,pattern=?,entity_type=?,replacement=?,enabled=? WHERE id=?',(v.name or v.value,kind,v.value,v.entity_type,v.replacement,int(v.enabled),rule_id)); c.commit(); c.close()
     if not cur.rowcount: raise HTTPException(404,'自定义敏感项不存在')
+    _rule_metadata(rule_id, category='用户自定义', scope='all', updated=datetime.now().timestamp())
     return {'id':rule_id,'mode':v.mode,'value':v.value}
 
 @app.delete('/api/custom-sensitive/{rule_id}')
 def delete_custom_sensitive(rule_id: str):
     c=conn(); cur=c.execute("DELETE FROM rules WHERE id=? AND kind IN ('word','literal','category')",(rule_id,)); c.commit(); c.close()
     if not cur.rowcount: raise HTTPException(404,'自定义敏感项不存在')
+    # rule_metadata is removed by the foreign-key cascade on fresh databases;
+    # clean up explicitly for legacy databases that predate that constraint.
+    c=conn(); c.execute('DELETE FROM rule_metadata WHERE rule_id=?',(rule_id,)); c.commit(); c.close()
     return {'deleted':rule_id}
 @app.post('/api/image/analyze')
 def image_analyze(file:UploadFile=File(...)):
@@ -928,6 +1362,16 @@ class FileMaskIn(BaseModel):
     boxes: list[dict[str, Any]] | None = Field(default=None, max_length=MAX_IMAGE_BOXES)
     image_override: bool = False
 
+
+class FilePreviewIn(BaseModel):
+    analysis_id: str
+    filename: str | None = Field(default=None, max_length=240)
+    text: str = Field(default='', max_length=2_000_000)
+    entities: list[dict[str, Any]] | None = Field(default=None, max_length=MAX_ENTITIES)
+    policies: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=500)
+    boxes: list[dict[str, Any]] | None = Field(default=None, max_length=MAX_IMAGE_BOXES)
+    image_override: bool = False
+
 class BatchMaskIn(BaseModel):
     policies: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=500)
     reviewed: bool = False
@@ -955,6 +1399,7 @@ def _validate_reversible_password(password: str | None) -> str:
 
 def _register_file_task(task_id: str, filename: str, kind: str, *, source_sha256='',
                         source_path='source.bin', status='analyzing', batch_id='', metadata=None) -> None:
+    metadata = {**(metadata or {}), 'source_retained': bool(source_path)}
     register_task(task_id, kind, original_name=_safe_filename(filename), source_path=source_path,
                   source_sha256=source_sha256, status=status, batch_id=batch_id, metadata=metadata)
 
@@ -972,15 +1417,25 @@ def _analysis_payload(task_id: str) -> dict[str, Any]:
     return payload
 
 
+
 _PRIVATE_ANALYSIS_FILES = {
     'analysis.json', 'result.md', 'content.json', 'entities.json',
     '.ocr-input.png',
 }
 
 
-def _remove_private_analysis(folder: Path, *, remove_source: bool = False) -> None:
-    """Delete intermediate files that can contain the original values."""
+def _remove_private_analysis(folder: Path, *, remove_source: bool = False,
+                             keep_analysis: bool = False) -> None:
+    """Delete disposable parser files while retaining an explicit audit snapshot.
+
+    Completed single-file tasks keep ``source.bin`` and ``analysis.json`` until
+    the task TTL so users can reopen a review and create another output. Batch
+    cleanup continues to pass ``remove_source=True`` and gets the historical
+    privacy behavior.
+    """
     for name in _PRIVATE_ANALYSIS_FILES:
+        if keep_analysis and name == 'analysis.json':
+            continue
         (folder / name).unlink(missing_ok=True)
     if remove_source:
         (folder / 'source.bin').unlink(missing_ok=True)
@@ -1657,7 +2112,8 @@ def files_mask(value: FileMaskIn):
     if not row:
         raise HTTPException(404, 'analysis not found')
     server_filename = str(row[0] or row[1])
-    if extension(value.filename) != extension(server_filename):
+    requested_filename = _safe_filename(str(value.filename or server_filename))
+    if extension(requested_filename) != extension(server_filename):
         raise HTTPException(422, '文件扩展名与分析任务不一致')
     data = source.read_bytes()
     expected_hash = str(row[2] or '')
@@ -1701,9 +2157,23 @@ def files_mask(value: FileMaskIn):
             (folder / 'mapping.enc').write_bytes(encrypt_json({'version': 1, 'filename': server_filename, 'data': data.hex(), 'sha256': expected_hash}, value.password or ''))
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-    # Keep plaintext source only until a successful result has been produced.
-    _remove_private_analysis(folder, remove_source=True)
-    update_task(value.analysis_id, output_name, artifact_name=output_name, source_path='', reversible=value.reversible)
+    else:
+        # Re-running a completed task in non-reversible mode must invalidate a
+        # previous encrypted mapping/restored artifact; otherwise the history
+        # row would claim the result is one-way while an old restore remained.
+        (folder / 'mapping.enc').unlink(missing_ok=True)
+        c = conn()
+        previous = c.execute('SELECT restored_name FROM tasks WHERE id=?', (value.analysis_id,)).fetchone()
+        c.close()
+        if previous and previous[0]:
+            (folder / Path(str(previous[0])).name).unlink(missing_ok=True)
+    # Keep the source and analysis snapshot under the task's private folder
+    # until TTL cleanup. This enables history reopening and a revised mask
+    # without ever placing source content in SQLite or the public report.
+    _remove_private_analysis(folder, keep_analysis=True)
+    update_task(value.analysis_id, output_name, artifact_name=output_name,
+                source_path='source.bin', reversible=value.reversible,
+                restored_name='')
     response: dict[str, Any] = {
         'task_id': value.analysis_id,
         'status': 'completed',
@@ -1718,6 +2188,96 @@ def files_mask(value: FileMaskIn):
     if ext in {'txt', 'md'}:
         response['masked_text'] = masked.decode('utf-8', 'replace')
     return response
+
+
+def _validated_file_review(value: FilePreviewIn | FileMaskIn) -> tuple[Path, str, bytes, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Validate a review payload against the immutable analysis snapshot."""
+    folder = _task_folder(value.analysis_id)
+    source = folder / 'source.bin'
+    if not source.is_file():
+        raise HTTPException(404, 'analysis not found')
+    row = _task_record(value.analysis_id)
+    server_filename = _safe_filename(str(row[0] or ''))
+    if extension(value.filename) != extension(server_filename):
+        raise HTTPException(422, '文件扩展名与分析任务不一致')
+    data = source.read_bytes()
+    expected_hash = str(row[5] or '')
+    if expected_hash and _sha256(data) != expected_hash:
+        raise HTTPException(409, '分析源文件已被修改')
+    manifest = _analysis_payload(value.analysis_id)
+    server_entities = manifest.get('entities', [])
+    if not isinstance(server_entities, list):
+        raise HTTPException(409, '分析实体格式无效')
+    submitted_entities = server_entities if value.entities is None else value.entities
+    allow_new = extension(server_filename) in IMAGE_EXTENSIONS or extension(server_filename) == 'pdf'
+    entities = _review_entities(server_entities, submitted_entities, allow_new=allow_new)
+    submitted_boxes = manifest.get('boxes', []) if value.boxes is None else value.boxes
+    boxes = _validate_boxes(submitted_boxes)
+    entities, boxes = _synchronize_review_selection(entities, boxes)
+    if extension(server_filename) == 'pdf':
+        _require_complete_pdf_review(manifest, boxes)
+    request_policies = _validate_policy_map(value.policies)
+    if extension(server_filename) in IMAGE_EXTENSIONS and not value.image_override:
+        request_policies = {}
+    return folder, server_filename, data, manifest, entities, boxes, request_policies
+
+
+@app.post('/api/files/preview')
+def files_preview(value: FilePreviewIn):
+    """Generate a disposable masked preview without changing task state."""
+    _load_policy_store()
+    folder, server_filename, data, _manifest, entities, boxes, request_policies = _validated_file_review(value)
+    try:
+        masked = mask_file(data, server_filename, str(_manifest.get('text', '')),
+                           entities, request_policies or policy_store, boxes)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise HTTPException(422, f'文件预览失败: {exc}') from exc
+    preview_id = uuid.uuid4().hex
+    preview_dir = folder / '.previews'
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    output_name = f'{preview_id}.{extension(server_filename)}'
+    (preview_dir / output_name).write_bytes(masked)
+    expires_at = time.time() + 2 * 3600
+    (preview_dir / f'{preview_id}.json').write_text(json.dumps({
+        'filename': server_filename, 'created': time.time(), 'expires': expires_at,
+        'sha256': _sha256(masked),
+    }, ensure_ascii=False), encoding='utf-8')
+    response: dict[str, Any] = {
+        'analysis_id': value.analysis_id,
+        'preview_id': preview_id,
+        'preview_url': f'/api/tasks/{value.analysis_id}/previews/{preview_id}',
+        'filename': server_filename,
+        'media_type': _SOURCE_MEDIA_TYPES.get(extension(server_filename)) or mimetypes.guess_type(server_filename)[0] or 'application/octet-stream',
+        'expires_at': expires_at,
+    }
+    if extension(server_filename) in {'txt', 'md'}:
+        response['masked_text'] = masked.decode('utf-8', 'replace')
+    return response
+
+
+@app.get('/api/tasks/{task_id}/previews/{preview_id}')
+def preview_artifact(task_id: str, preview_id: str):
+    if not re.fullmatch(r'[0-9a-f]{32}', str(preview_id), re.IGNORECASE):
+        raise HTTPException(404, 'preview not found')
+    row = _task_record(task_id)
+    filename = _safe_filename(str(row[0] or 'preview.bin'))
+    directory = _task_path(task_id) / '.previews'
+    metadata_path = directory / f'{preview_id}.json'
+    output = directory / f'{preview_id}.{extension(filename)}'
+    if not metadata_path.is_file() or not output.is_file():
+        raise HTTPException(404, 'preview not found')
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(404, 'preview not found') from None
+    if not isinstance(metadata, dict) or float(metadata.get('expires', 0)) < time.time():
+        metadata_path.unlink(missing_ok=True); output.unlink(missing_ok=True)
+        raise HTTPException(404, 'preview 已过期')
+    media_type = _SOURCE_MEDIA_TYPES.get(extension(filename)) or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    return FileResponse(output, filename=f'{Path(filename).stem}_预览.{extension(filename)}',
+                        media_type=media_type, content_disposition_type='inline')
 
 @app.post('/api/tasks/{task_id}/restore')
 def restore_file(task_id: str, value: RestoreFileIn):
