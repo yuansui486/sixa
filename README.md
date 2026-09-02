@@ -15,7 +15,7 @@ uv sync --extra ai --extra ocr --extra dev
 
 RaNER 模型使用 ModelScope 标识 `iic/nlp_raner_named-entity-recognition_chinese-base-generic`。图片和扫描 PDF 使用 PaddleOCR **2.10.0**（配套 PaddlePaddle 3.0.0 CPU wheel），模型文件保存在项目 `models/` 或 Paddle 的本机缓存目录。首次点击“初始化 RaNER / OCR”会下载模型，耗时和磁盘占用取决于网络速度。
 
-未安装或未初始化模型时，内置正则和自定义规则仍可处理文本、Office 和可搜索 PDF。扫描 PDF 必须先初始化 OCR，并在模型就绪后重新上传分析；如果分析结果包含 OCR 失败、页数超限或 OCR 未初始化警告，服务会拒绝生成脱敏文件，避免返回仍含原图文字的“假成功”结果。
+系统启动时会自动加载或下载 RaNER 与 PaddleOCR。只有两个模型都就绪后，文本、Office、PDF 和图片的分析、预览、脱敏接口才会开放；模型下载、初始化或推理异常时接口返回 `MODELS_NOT_READY`，不会退回仅靠正则识别的保底模式。扫描 PDF 还会校验每个需要 OCR 的页面；若出现 OCR 失败、页数超限或空识别结果，服务会拒绝生成脱敏文件，避免返回仍含原图文字的“假成功”结果。
 
 Windows CPU 环境的 OCR 推理固定在单线程 worker，并显式关闭 oneDNN/MKL-DNN。若本机已有冲突的 Paddle wheel，请按项目锁定版本重新同步：
 
