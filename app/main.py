@@ -588,6 +588,12 @@ def analyze(text):
         if len(accepted) >= MAX_ENTITIES:
             break
     accepted.sort(key=lambda x:(x['start'], -x['end']))
+    custom_names = {str(row.get('entity_type')): str(row.get('name') or row.get('entity_type'))
+                    for row in _rule_rows()}
+    for item in accepted:
+        code = str(item.get('type', 'DEFAULT'))
+        item['type_name'] = ENTITY_CATALOG.get(code) or custom_names.get(code, code)
+        item['label'] = item['type_name']
     # Normalize every detection through Presidio's public result type so all
     # adapters expose one protocol regardless of recognizer implementation.
     try:
