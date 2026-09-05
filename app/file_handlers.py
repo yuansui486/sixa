@@ -706,7 +706,10 @@ def _clear_xlsx_metadata(workbook: Any) -> None:
 
 def _pdf_word_ranges(page: Any, page_text: str) -> list[tuple[int, int, Any]]:
     """Map character ranges in ``page.get_text()`` to word rectangles."""
-    words = page.get_text("words", sort=True) or []
+    # Keep the same extraction order as ``page.get_text()``.  Sorting words
+    # geometrically can diverge from the text stream (notably in resumes with
+    # sidebars/watermarks), causing offsets to resolve to the wrong rectangle.
+    words = page.get_text("words", sort=False) or []
     result: list[tuple[int, int, Any]] = []
     cursor = 0
     for word in words:
@@ -717,16 +720,43 @@ def _pdf_word_ranges(page: Any, page_text: str) -> list[tuple[int, int, Any]]:
             continue
         start = page_text.find(token, cursor)
         if start < 0:
-            # Ligatures and unusual extraction order can make the sequential
-            # search fail.  A second search still gives a useful rectangle;
-            # duplicate tokens are disambiguated by the first pass whenever
-            # possible.
-            start = page_text.find(token)
-        if start < 0:
+            # Never fall back to the first matching token: duplicate labels or
+            # watermark text would otherwise receive another entity's bbox.
             continue
         end = start + len(token)
         result.append((start, end, word))
         cursor = end
+    return result
+
+
+def _pdf_char_ranges(page: Any, page_text: str) -> list[tuple[int, int, Any]]:
+    """Map extracted characters to their precise PDF rectangles.
+
+    ``get_text('words')`` may return an entire Chinese label and value as one
+    word. Character boxes keep a selected phone number from also covering the
+    adjacent ``电话：`` label.
+    """
+    result: list[tuple[int, int, Any]] = []
+    cursor = 0
+    raw = page.get_text("rawdict", sort=False) or {}
+    for block in raw.get("blocks", []):
+        if not isinstance(block, dict) or int(block.get("type", 0)) != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                chars = span.get("chars", [])
+                value = "".join(str(char.get("c", "")) for char in chars)
+                if not value:
+                    continue
+                start = page_text.find(value, cursor)
+                local = start
+                for char in chars:
+                    value_char = str(char.get("c", ""))
+                    bbox = char.get("bbox")
+                    if value_char and bbox and len(bbox) == 4:
+                        result.append((local, local + len(value_char), bbox))
+                    local += len(value_char)
+                cursor = start + len(value)
     return result
 
 
@@ -768,13 +798,21 @@ def _pdf_bbox_rect(entity: dict, page: Any, fitz: Any) -> Any | None:
         return None
     # Normalized boxes are the public protocol.  Accept absolute PDF points
     # as a convenience for OCR integrations that already use page coordinates.
+    page_rect = page.rect
     if 0 <= x <= 1 and 0 <= y <= 1 and 0 < width <= 1 and 0 < height <= 1:
-        rect = page.rect
+        rect = page_rect
+        x1 = min(1.0, x + width); y1 = min(1.0, y + height)
         return fitz.Rect(rect.x0 + x * rect.width, rect.y0 + y * rect.height,
-                         rect.x0 + (x + width) * rect.width, rect.y0 + (y + height) * rect.height)
+                         rect.x0 + x1 * rect.width, rect.y0 + y1 * rect.height)
     if width <= 0 or height <= 0:
         return None
-    return fitz.Rect(x, y, x + width, y + height)
+    # Absolute boxes from OCR integrations must intersect the page.  Clipping
+    # here prevents malformed coordinates from turning into page-sized masks.
+    rect = fitz.Rect(x, y, x + width, y + height)
+    rect &= page_rect
+    if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+        return None
+    return rect
 
 
 _PDF_EMBEDDED_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -861,16 +899,45 @@ def _redact_pdf(
         if index + 1 < len(page_texts):
             cursor += 1
     mapping: dict[tuple[str, str], str] = {}
-    # OCR/manual boxes are first-class review regions. Older callers only
-    # supplied entities, so retain that API while allowing the unified file
-    # endpoint to redact a box even when it contains no recognized PII.
-    all_entities: list[dict] = [*entities, *(boxes or [])]
+    # OCR/manual boxes are first-class review regions.  A parent OCR line that
+    # already has child entities is skipped to avoid masking the whole line.
+    linked_box_ids = {
+        str(value) for entity in entities if isinstance(entity, dict)
+        for value in (entity.get("box_ids", []) or []) if value
+    }
+    review_boxes: list[dict] = []
+    entity_geometries: set[tuple[float, float, float, float]] = set()
+    for entity in entities:
+        if not isinstance(entity, dict) or not isinstance(entity.get("bbox"), dict):
+            continue
+        try:
+            entity_geometries.add(tuple(round(value, 8) for value in _image_box(entity)))
+        except ValueError:
+            continue
+    for box in boxes or []:
+        box_id = str(box.get("id", ""))
+        if box_id and box_id in linked_box_ids:
+            continue
+        if not box_id and str(box.get("source", "")).lower() != "manual":
+            try:
+                if tuple(round(value, 8) for value in _image_box(box)) in entity_geometries:
+                    continue
+            except ValueError:
+                pass
+        # Boxes supplied through the explicit review API are user-selected
+        # regions when no source is declared.  Mark that provenance so the
+        # conservative auto-box size guard below does not suppress them.
+        if not str(box.get("source", "")).strip():
+            box = {**box, "source": "manual"}
+        review_boxes.append(box)
+    all_entities: list[dict] = [*entities, *review_boxes]
     for page_index, page in enumerate(document):
         page_number = page_index + 1
         page_text = page_texts[page_index]
         page_start, page_end = page_ranges[page_index]
+        char_ranges = _pdf_char_ranges(page, page_text)
         word_ranges = _pdf_word_ranges(page, page_text)
-        annotations: list[tuple[Any, str]] = []
+        annotations: list[tuple[Any, str, dict]] = []
         seen_regions: set[tuple[Any, ...]] = set()
         for entity in all_entities:
             requested_page = entity.get("page")
@@ -890,18 +957,28 @@ def _redact_pdf(
             if not entity.get("selected", True):
                 continue
             policy = policy_for(str(entity.get("type", "DEFAULT")), policies)
-            if policy.get("text_action", "replace") == "keep":
+            action = str(policy.get("image_action") or "blur").lower()
+            if action == "keep" or str(policy.get("text_action", "replace")).lower() == "keep":
                 continue
             span = _pdf_entity_span(entity, page_number, page_text, page_start, page_end)
             rectangles: list[Any] = []
             if span is not None:
                 start, end = span
-                covered = [word for word_start, word_end, word in word_ranges if word_start < end and word_end > start]
+                covered = [char for char_start, char_end, char in char_ranges if char_start < end and char_end > start]
+                if not covered:
+                    covered = [word for word_start, word_end, word in word_ranges if word_start < end and word_end > start]
                 if covered:
                     rectangles = [fitz.Rect(word[0], word[1], word[2], word[3]) for word in covered]
             if not rectangles:
                 bbox_rect = _pdf_bbox_rect(entity, page, fitz)
                 if bbox_rect is not None:
+                    # Auto-generated OCR/entity boxes occasionally contain a
+                    # page-sized fallback rectangle.  Such a box is not a
+                    # credible single entity and would erase unrelated text;
+                    # explicit manual regions remain honored.
+                    source = str(entity.get("source", "")).lower()
+                    if source != "manual" and bbox_rect.get_area() > page.rect.get_area() * 0.45:
+                        continue
                     rectangles = [bbox_rect]
             if not rectangles:
                 continue
@@ -923,11 +1000,54 @@ def _redact_pdf(
                 continue
             seen_regions.add(region_key)
             replacement = replacement_for(entity, policies, mapping)
-            annotations.append((rect, replacement))
-        for rect, replacement in annotations:
-            page.add_redact_annot(rect, text=replacement, fill=(0, 0, 0), text_color=(1, 1, 1))
+            annotations.append((rect, replacement, policy))
+
+        # Capture and transform each region before deleting the underlying PDF
+        # objects.  Re-inserting a PNG patch keeps the result visually natural
+        # while ensuring the original text cannot be extracted afterwards.
+        patches: list[tuple[Any, bytes]] = []
+        for rect, replacement, policy in annotations:
+            # Always register the redaction first; even if rasterization fails
+            # the sensitive source object must still be removed.
+            page.add_redact_annot(rect, fill=(1, 1, 1))
+            try:
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=rect, alpha=True)
+                with Image.open(io.BytesIO(pix.tobytes("png"))) as source:
+                    region = source.convert("RGBA")
+                action = str(policy.get("image_action") or "blur").lower()
+                if action == "pixelate":
+                    factor = max(2, min(40, int(policy.get("pixel_size", 12) or 12)))
+                    small = region.resize((max(1, region.width // factor), max(1, region.height // factor)), Image.Resampling.BILINEAR)
+                    region = small.resize(region.size, Image.Resampling.NEAREST)
+                elif action == "solid":
+                    region = Image.new("RGBA", region.size, _image_color(policy.get("color", "#d9d9d9")))
+                elif action == "text":
+                    region = Image.new("RGBA", region.size, _image_color(policy.get("color", "#ffffff")))
+                else:
+                    radius = max(1, min(80, int(policy.get("blur_radius", 14) or 14)))
+                    region = region.filter(ImageFilter.GaussianBlur(radius))
+                    # A subtle veil prevents residual glyph shapes without the
+                    # harsh black rectangles of the legacy implementation.
+                    veil = Image.new("RGBA", region.size, (255, 255, 255, 38))
+                    region = Image.alpha_composite(region, veil)
+                if bool(policy.get("show_replacement", True)) and replacement:
+                    _draw_mask_text(region, (0, 0, region.width, region.height), replacement)
+                patch = io.BytesIO()
+                region.save(patch, format="PNG", optimize=True)
+                patches.append((rect, patch.getvalue()))
+            except Exception:
+                # A malformed clip should not abort processing of the whole
+                # document; the redaction itself remains effective.
+                continue
         if annotations:
-            page.apply_redactions()
+            try:
+                # Remove sensitive text/images while preserving unrelated
+                # vector graphics such as colored resume headers and rules.
+                page.apply_redactions(images=2, graphics=0, text=0)
+            except TypeError:
+                page.apply_redactions()
+            for rect, patch in patches:
+                page.insert_image(rect, stream=patch, keep_proportion=False, overlay=True)
         _redact_pdf_links(page, fitz, policies, mapping)
     output = io.BytesIO()
     # Remove document metadata and garbage-collect deleted text streams so a
@@ -975,6 +1095,7 @@ def _image_box(entity: dict) -> tuple[float, float, float, float]:
 def _system_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     windows_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
     candidates = [
+        os.environ.get("DESENSITIZATION_CJK_FONT", ""),
         windows_fonts / "msyh.ttc", windows_fonts / "simhei.ttf", windows_fonts / "simsun.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 from presidio_analyzer import RecognizerResult
@@ -10,32 +11,32 @@ from presidio_anonymizer.entities import OperatorConfig
 
 _ANONYMIZER = AnonymizerEngine()
 
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 _COMMON_IMAGE = {"image_action": "blur", "show_replacement": True, "blur_radius": 16, "pixel_size": 12, "color": "#000000"}
 DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
-    "PERSON": {"text_action": "replace", "replacement": "某人", "image_action": "solid", "color": "#000000"},
-    "ORGANIZATION": {"text_action": "replace", "replacement": "某机构", "image_action": "solid", "color": "#000000"},
-    "LOCATION": {"text_action": "replace", "replacement": "某地点", "image_action": "solid", "color": "#000000"},
-    "GPE": {"text_action": "replace", "replacement": "某地点", "image_action": "solid", "color": "#000000"},
-    "ADDRESS": {"text_action": "replace", "replacement": "某地址", "image_action": "solid", "color": "#000000"},
-    "PHONE": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
-    "PHONE_NUMBER": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
-    "ID_CARD": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
-    "BANK_CARD": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
-    "EMAIL": {"text_action": "replace", "replacement": "***@***", "image_action": "solid", "color": "#000000"},
-    "EMAIL_ADDRESS": {"text_action": "replace", "replacement": "***@***", "image_action": "solid", "color": "#000000"},
-    "IP_ADDRESS": {"text_action": "replace", "replacement": "0.0.0.0", "image_action": "solid", "color": "#000000"},
+    "PERSON": {"text_action": "replace", "replacement": "某人", "image_action": "blur", "color": "#000000"},
+    "ORGANIZATION": {"text_action": "replace", "replacement": "某公司", "image_action": "blur", "color": "#000000"},
+    "LOCATION": {"text_action": "replace", "replacement": "某地点", "image_action": "blur", "color": "#000000"},
+    "GPE": {"text_action": "replace", "replacement": "某地点", "image_action": "blur", "color": "#000000"},
+    "ADDRESS": {"text_action": "replace", "replacement": "某地址", "image_action": "blur", "color": "#000000"},
+    "PHONE": {"text_action": "mask", "replacement": "", "image_action": "blur", "color": "#000000"},
+    "PHONE_NUMBER": {"text_action": "mask", "replacement": "", "image_action": "blur", "color": "#000000"},
+    "ID_CARD": {"text_action": "mask", "replacement": "", "image_action": "blur", "color": "#000000"},
+    "BANK_CARD": {"text_action": "mask", "replacement": "", "image_action": "blur", "color": "#000000"},
+    "EMAIL": {"text_action": "replace", "replacement": "***@***", "image_action": "blur", "color": "#000000"},
+    "EMAIL_ADDRESS": {"text_action": "replace", "replacement": "***@***", "image_action": "blur", "color": "#000000"},
+    "IP_ADDRESS": {"text_action": "replace", "replacement": "***.***.***.***", "image_action": "blur", "color": "#000000"},
     "DATE_TIME": {"text_action": "replace", "replacement": "某日期", "image_action": "blur", "color": "#000000"},
-    "MONEY": {"text_action": "replace", "replacement": "某金额", "image_action": "solid", "color": "#000000"},
-    "LICENSE_PLATE": {"text_action": "replace", "replacement": "车牌号", "image_action": "solid", "color": "#000000"},
-    "PASSPORT": {"text_action": "replace", "replacement": "证件号", "image_action": "solid", "color": "#000000"},
-    "URL": {"text_action": "replace", "replacement": "***", "image_action": "solid", "color": "#000000"},
-    "MAC_ADDRESS": {"text_action": "replace", "replacement": "***", "image_action": "solid", "color": "#000000"},
-    "WECHAT_ID": {"text_action": "replace", "replacement": "微信用户", "image_action": "solid", "color": "#000000"},
-    "QQ_NUMBER": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
-    "POSTAL_CODE": {"text_action": "mask", "replacement": "", "image_action": "solid", "color": "#000000"},
-    "CUSTOM": {"text_action": "replace", "replacement": "已脱敏", "image_action": "solid", "color": "#000000"},
-    "DEFAULT": {"text_action": "token", "replacement": "", "image_action": "solid", "color": "#000000"},
+    "MONEY": {"text_action": "replace", "replacement": "某金额", "image_action": "blur", "color": "#000000"},
+    "LICENSE_PLATE": {"text_action": "replace", "replacement": "某车牌", "image_action": "blur", "color": "#000000"},
+    "PASSPORT": {"text_action": "replace", "replacement": "某证件", "image_action": "blur", "color": "#000000"},
+    "URL": {"text_action": "replace", "replacement": "某网址", "image_action": "blur", "color": "#000000"},
+    "MAC_ADDRESS": {"text_action": "replace", "replacement": "某设备地址", "image_action": "blur", "color": "#000000"},
+    "WECHAT_ID": {"text_action": "replace", "replacement": "某微信号", "image_action": "blur", "color": "#000000"},
+    "QQ_NUMBER": {"text_action": "mask", "replacement": "", "image_action": "blur", "color": "#000000"},
+    "POSTAL_CODE": {"text_action": "mask", "replacement": "", "image_action": "blur", "color": "#000000"},
+    "CUSTOM": {"text_action": "replace", "replacement": "已脱敏", "image_action": "blur", "color": "#000000"},
+    "DEFAULT": {"text_action": "replace", "replacement": "已脱敏信息", "image_action": "blur", "color": "#000000"},
 }
 # Normalize built-ins so every entity has the same usable image defaults.
 for _name, _policy in DEFAULT_POLICIES.items():
@@ -68,6 +69,59 @@ def _mask_value(value: str, entity_type: str) -> str:
     return "*" * max(3, len(value))
 
 
+def _semantic_replacement(entity_type: str, original: str) -> str:
+    """Return a readable Chinese placeholder for built-in entity types.
+
+    The recognizer may classify all kinds of organizations as ORGANIZATION;
+    using the surrounding text makes the resulting document more natural.
+    """
+    if entity_type == "PERSON":
+        return "某人"
+    if entity_type == "ORGANIZATION":
+        if re.search(r"学校|大学|学院|中学|小学", original):
+            return "某学校"
+        if re.search(r"医院|诊所|卫生院", original):
+            return "某医院"
+        if re.search(r"银行|证券|基金|保险", original):
+            return "某金融机构"
+        if re.search(r"公司|集团|企业|股份|有限|科技|实业", original):
+            return "某公司"
+        return "某机构"
+    if entity_type in {"LOCATION", "GPE"}:
+        return "某地点"
+    if entity_type == "ADDRESS":
+        return "某地址"
+    return {
+        "DATE_TIME": "某日期",
+        "MONEY": "某金额",
+        "LICENSE_PLATE": "某车牌",
+        "PASSPORT": "某证件",
+        "URL": "某网址",
+        "EMAIL": "***@***",
+        "EMAIL_ADDRESS": "***@***",
+        "IP_ADDRESS": "***.***.***.***",
+        "MAC_ADDRESS": "某设备地址",
+        "WECHAT_ID": "某微信号",
+        "CUSTOM": "已脱敏",
+        "DEFAULT": "已脱敏信息",
+    }.get(entity_type, "已脱敏")
+
+
+def _has_explicit_replacement(entity_type: str, policies: dict | None) -> bool:
+    if not isinstance(policies, dict):
+        return False
+    for name in ("DEFAULT", entity_type):
+        candidate = policies.get(name)
+        if not isinstance(candidate, dict) or "replacement" not in candidate:
+            continue
+        # A complete policy store contains the built-in value as well.  Only
+        # treat it as an override when the user actually changed that value.
+        builtin = DEFAULT_POLICIES.get(name, {}).get("replacement")
+        if candidate.get("replacement") != builtin:
+            return True
+    return False
+
+
 def replacement_for(entity: dict, policies: dict | None, mapping: dict[tuple[str, str], str]) -> str:
     entity_type = str(entity.get("type", "DEFAULT"))
     original = str(entity.get("text", ""))
@@ -88,16 +142,25 @@ def replacement_for(entity: dict, policies: dict | None, mapping: dict[tuple[str
     elif action == "keep":
         result = original
     elif action == "replace":
-        result = str(policy.get("replacement") or "***")
+        configured = policy.get("replacement")
+        # Built-in replacements are semantic rather than asterisks.  A value
+        # supplied by the user (including a fixed custom replacement) always
+        # wins, while empty/internal placeholders are normalized.
+        if _has_explicit_replacement(entity_type, policies) and configured:
+            result = str(configured)
+        else:
+            result = _semantic_replacement(entity_type, original)
     elif action == "mask":
         result = _mask_value(original, entity_type)
     elif action == "hash":
         result = hashlib.sha256(original.encode("utf-8")).hexdigest()[:12]
     elif action == "pseudonym":
-        result = {"PERSON": "某人", "ORGANIZATION": "某机构", "LOCATION": "某地点"}.get(entity_type, "已脱敏")
+        result = _semantic_replacement(entity_type, original)
     else:
-        digest = hashlib.sha256((entity_type + "\0" + original).encode("utf-8")).hexdigest()[:8].upper()
-        result = f"__MASKED_{entity_type}_{digest}__"
+        result = _semantic_replacement(entity_type, original)
+    # Never leak rendering artifacts or implementation tokens to users.
+    if not result or "???" in result or result.startswith("__MASKED_"):
+        result = _semantic_replacement(entity_type, original)
     mapping[key] = result
     return result
 

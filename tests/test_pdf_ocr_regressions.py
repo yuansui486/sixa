@@ -66,10 +66,16 @@ def test_scanned_pdf_ocr_uses_page_offsets_and_redacts_boxes(monkeypatch):
             },
         )
         assert masked.status_code == 200, masked.text
-        result = fitz.open(stream=client.get(masked.json()["artifact"]).content, filetype="pdf")
+        output = client.get(masked.json()["artifact"]).content
+        result = fitz.open(stream=output, filetype="pdf")
         assert all("13800138000" not in page.get_text() for page in result)
-        assert all("138****8000" in page.get_text() for page in result)
         assert all("__MASKED_OCR_" not in page.get_text() for page in result)
+        source = fitz.open(stream=_scan_pdf(), filetype="pdf")
+        for page_number in range(result.page_count):
+            before = source[page_number].get_pixmap(alpha=False).tobytes("png")
+            after = result[page_number].get_pixmap(alpha=False).tobytes("png")
+            assert before != after
+        source.close()
         result.close()
 
 

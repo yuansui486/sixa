@@ -17,11 +17,11 @@ client = TestClient(app)
 def test_builtin_policies_cover_common_entities_with_chinese_replacements():
     required = {
         "PERSON": "某人",
-        "ORGANIZATION": "某机构",
+        "ORGANIZATION": "某公司",
         "LOCATION": "某地点",
         "ADDRESS": "某地址",
         "EMAIL": "***@***",
-        "IP_ADDRESS": "0.0.0.0",
+        "IP_ADDRESS": "***.***.***.***",
     }
     for entity_type, replacement in required.items():
         policy = policy_for(entity_type)

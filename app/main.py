@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field, ValidationError
@@ -135,12 +135,34 @@ def _load_policy_store() -> None:
         return
     c = conn()
     row = c.execute('SELECT value FROM settings WHERE key=?', ('policies',)).fetchone()
+    version_row = c.execute('SELECT value FROM settings WHERE key=?', ('policy_defaults_version',)).fetchone()
     c.close()
+    stored_version = 0
+    try:
+        stored_version = int(version_row[0]) if version_row else 0
+    except (TypeError, ValueError):
+        stored_version = 0
     if row:
         try:
             stored = json.loads(str(row[0]))
             if isinstance(stored, dict):
-                policy_store.update(_validate_policy_map(stored))
+                loaded = _validate_policy_map(stored)
+                # Versions before the soft-mask defaults used ``solid`` for
+                # every built-in type.  Migrate only unversioned/old data;
+                # current explicit ``solid`` choices remain user-controlled.
+                if stored_version < POLICY_VERSION:
+                    for entity_type, policy in loaded.items():
+                        if (
+                            entity_type in DEFAULT_POLICIES
+                            and policy.get('image_action') == 'solid'
+                            and str(policy.get('color', '#000000')).lower() in {'#000000', '000000'}
+                        ):
+                            policy['image_action'] = 'blur'
+                    if 'DEFAULT' in loaded and isinstance(loaded['DEFAULT'], dict):
+                        loaded['DEFAULT']['image_action'] = 'blur'
+                policy_store.update(loaded)
+                if stored_version < POLICY_VERSION:
+                    _persist_policy_store()
         except (TypeError, ValueError, json.JSONDecodeError, HTTPException):
             # A malformed local setting must not prevent the rule engine from
             # starting; built-in policies remain the safe fallback.
@@ -154,6 +176,11 @@ def _persist_policy_store() -> None:
         'INSERT INTO settings(key,value) VALUES(?,?) '
         'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
         ('policies', json.dumps(policy_store, ensure_ascii=False, separators=(',', ':'))),
+    )
+    c.execute(
+        'INSERT INTO settings(key,value) VALUES(?,?) '
+        'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+        ('policy_defaults_version', str(POLICY_VERSION)),
     )
     c.commit()
     c.close()
@@ -359,7 +386,11 @@ PATTERNS=[
     ('MONEY',r'(?:人民币|RMB|￥|¥)\s?\d+(?:\.\d+)?|\d+(?:\.\d+)?(?:元|万元|亿元|美元|欧元)',None),
     ('LICENSE_PLATE',r'[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼][A-Z][A-Z0-9挂学警港澳领使]{5,6}',None),
     ('WECHAT_ID',r'(?<![A-Za-z0-9_-])[A-Za-z][-_A-Za-z0-9]{5,19}(?![A-Za-z0-9_-])',None),
-    ('POSTAL_CODE',r'(?<!\d)[1-9]\d{5}(?!\d)',None),
+    # Postal codes are six digits, but should not be extracted from hashes,
+    # tracking IDs, filenames, or other alphanumeric identifiers.  Chinese
+    # labels such as ``邮编100000`` remain valid because the boundary only
+    # excludes ASCII identifier characters.
+    ('POSTAL_CODE',r'(?<![A-Za-z0-9_-])[1-9]\d{5}(?![A-Za-z0-9_-])',None),
     ('QQ_NUMBER',r'(?<!\d)[1-9]\d{4,11}(?!\d)',None),
     ('PASSPORT',r'(?<![A-Za-z0-9])[EGPASD][A-Za-z0-9]\d{7}(?![A-Za-z0-9])',None),
     ('MAC_ADDRESS',r'(?<![A-Fa-f0-9])(?:[A-Fa-f0-9]{2}[:-]){5}[A-Fa-f0-9]{2}(?![A-Fa-f0-9])',None),
@@ -579,7 +610,9 @@ def analyze(text):
                 continue
             found.append({'id':uuid.uuid4().hex,'type':typ,'text':m.group(),'start':m.start(),'end':m.end(),'score':1.0,'recognizer':name or 'custom','source':'custom','replacement':replacement,'selected':True,'box_ids':[]})
     if settings.get('ner_enabled', True):
-        found.extend([{**e,'id':uuid.uuid4().hex,'selected':float(e.get('score',0)) >= 0.45,'box_ids':[]} for e in ner_service.analyze(text)])
+        # NER candidates at or above 0.3 are selected by default. Users can
+        # still review and deselect individual candidates in the workbench.
+        found.extend([{**e,'id':uuid.uuid4().hex,'selected':float(e.get('score',0)) >= 0.3,'box_ids':[]} for e in ner_service.analyze(text)])
     # Prefer higher confidence and longer spans when recognizers overlap.
     found.sort(key=lambda x:(-float(x.get('score',0)), -(x['end']-x['start']), x['start']))
     accepted=[]
@@ -669,7 +702,7 @@ class RuleIn(BaseModel):
     kind: str
     pattern: str = Field(min_length=1, max_length=10_000)
     entity_type: str = Field(default='CUSTOM', min_length=1, max_length=80)
-    replacement: str = Field(default='__MASKED_CUSTOM__', max_length=500)
+    replacement: str = Field(default='已脱敏', max_length=500)
     category: str = Field(default='自定义规则', min_length=1, max_length=80)
     scope: str = Field(default='all', pattern='^(all|text|image|document)$')
 
@@ -944,6 +977,19 @@ def _task_record(task_id: str) -> tuple[Any, ...]:
     return row
 
 
+def _task_source(task_id: str, row: tuple[Any, ...] | None = None) -> tuple[tuple[Any, ...], Path, str]:
+    row = row or _task_record(task_id)
+    filename = _safe_filename(str(row[0] or 'source.bin'))
+    source_name = Path(str(row[9] or 'source.bin')).name
+    if source_name != str(row[9] or 'source.bin'):
+        raise HTTPException(404, 'source not found')
+    folder = _task_path(task_id).resolve()
+    path = (folder / source_name).resolve()
+    if path.parent != folder or not path.is_file():
+        raise HTTPException(404, 'source not found')
+    return row, path, filename
+
+
 @app.get('/api/tasks/{task_id}/analysis')
 def task_analysis(task_id: str):
     row = _task_record(task_id)
@@ -955,6 +1001,7 @@ def task_analysis(task_id: str):
     if not isinstance(metadata, dict):
         metadata = {}
     filename = _safe_filename(str(row[0] or payload.get('filename') or 'upload.bin'))
+    source_url = f'/api/tasks/{task_id}/source-preview' if row[9] else None
     payload.update({
         'analysis_id': task_id,
         'filename': filename,
@@ -966,8 +1013,15 @@ def task_analysis(task_id: str):
         'reversible': bool(row[6]),
         'batch_id': str(row[7] or ''),
         'metadata': metadata,
-        'source_preview': f'/api/tasks/{task_id}/source-preview' if row[9] else None,
+        'source_preview': source_url,
     })
+    if source_url:
+        _row, source_path, _filename = _task_source(task_id, row)
+        view_url = f'/api/tasks/{task_id}/source-image' if extension(filename) in IMAGE_EXTENSIONS else source_url
+        payload['source_view'] = _preview_view(
+            source_path.read_bytes(), filename, url=view_url,
+            page_url_template=f'/api/tasks/{task_id}/source-pages/{{page}}',
+        )
     return payload
 
 
@@ -983,17 +1037,28 @@ _SOURCE_MEDIA_TYPES = {
 
 @app.get('/api/tasks/{task_id}/source-preview')
 def source_preview(task_id: str):
-    row = _task_record(task_id)
-    filename = _safe_filename(str(row[0] or 'source.bin'))
-    source_name = Path(str(row[9] or 'source.bin')).name
-    if source_name != str(row[9] or 'source.bin'):
-        raise HTTPException(404, 'source not found')
-    path = (_task_path(task_id) / source_name).resolve()
-    if path.parent != _task_path(task_id).resolve() or not path.is_file():
-        raise HTTPException(404, 'source not found')
+    _row, path, filename = _task_source(task_id)
     media_type = _SOURCE_MEDIA_TYPES.get(extension(filename)) or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
     return FileResponse(path, filename=filename, media_type=media_type,
                         content_disposition_type='inline')
+
+
+@app.get('/api/tasks/{task_id}/source-image')
+def source_image_preview(task_id: str):
+    _row, path, filename = _task_source(task_id)
+    if extension(filename) not in IMAGE_EXTENSIONS:
+        raise HTTPException(404, 'image preview not found')
+    return Response(_image_preview_png(path.read_bytes()), media_type='image/png',
+                    headers={'Cache-Control': 'private, no-store'})
+
+
+@app.get('/api/tasks/{task_id}/source-pages/{page_number}')
+def source_pdf_page(task_id: str, page_number: int):
+    _row, path, filename = _task_source(task_id)
+    if extension(filename) != 'pdf':
+        raise HTTPException(404, 'PDF preview not found')
+    return Response(_pdf_page_png(path.read_bytes(), page_number), media_type='image/png',
+                    headers={'Cache-Control': 'private, no-store'})
 @app.delete('/api/tasks/{task_id}')
 def delete_task(task_id):
     folder = _task_path(task_id)
@@ -1421,6 +1486,233 @@ def _analysis_payload(task_id: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise HTTPException(409, '分析结果格式无效')
     return payload
+
+
+_PREVIEW_TEXT_LIMIT = 500_000
+_PREVIEW_BLOCK_LIMIT = 2_000
+_PREVIEW_CELL_LIMIT = 10_000
+_PREVIEW_SHEET_LIMIT = 100
+
+
+def _preview_text(value: Any, *, limit: int = 100_000) -> tuple[str, bool]:
+    text = str(value or '')
+    if len(text) <= limit:
+        return text, False
+    return text[:limit], True
+
+
+def _docx_preview(data: bytes) -> dict[str, Any]:
+    """Return a bounded, presentation-only view of a DOCX package."""
+    from docx import Document
+    from docx.table import Table
+
+    document = Document(io.BytesIO(data))
+    blocks: list[dict[str, Any]] = []
+    total_characters = 0
+    table_cell_count = 0
+    truncated = False
+
+    def append_paragraph(paragraph: Any, location: str) -> None:
+        nonlocal total_characters, truncated
+        if len(blocks) >= _PREVIEW_BLOCK_LIMIT or total_characters >= _PREVIEW_TEXT_LIMIT:
+            truncated = True
+            return
+        remaining = _PREVIEW_TEXT_LIMIT - total_characters
+        text, clipped = _preview_text(paragraph.text, limit=max(1, remaining))
+        style = str(getattr(getattr(paragraph, 'style', None), 'name', '') or '')
+        blocks.append({'type': 'paragraph', 'location': location, 'text': text, 'style': style})
+        total_characters += len(text)
+        truncated = truncated or clipped
+
+    def append_table(table: Any, location: str) -> None:
+        nonlocal table_cell_count, total_characters, truncated
+        if len(blocks) >= _PREVIEW_BLOCK_LIMIT or total_characters >= _PREVIEW_TEXT_LIMIT:
+            truncated = True
+            return
+        rows: list[list[str]] = []
+        for row in table.rows:
+            values: list[str] = []
+            for cell in row.cells:
+                if table_cell_count >= _PREVIEW_CELL_LIMIT:
+                    truncated = True
+                    break
+                remaining = _PREVIEW_TEXT_LIMIT - total_characters
+                if remaining <= 0:
+                    truncated = True
+                    break
+                value, clipped = _preview_text(cell.text, limit=max(1, remaining))
+                values.append(value)
+                table_cell_count += 1
+                total_characters += len(value)
+                truncated = truncated or clipped
+            rows.append(values)
+            if table_cell_count >= _PREVIEW_CELL_LIMIT or (truncated and total_characters >= _PREVIEW_TEXT_LIMIT):
+                break
+        blocks.append({'type': 'table', 'location': location, 'rows': rows})
+
+    for block in document.iter_inner_content():
+        if isinstance(block, Table):
+            append_table(block, 'body')
+        else:
+            append_paragraph(block, 'body')
+        if truncated and (len(blocks) >= _PREVIEW_BLOCK_LIMIT or total_characters >= _PREVIEW_TEXT_LIMIT):
+            break
+
+    # Linked headers and footers can be repeated by several sections. Expose
+    # each XML part once so the view matches what the sanitizer actually scans.
+    seen_parts: set[int] = set()
+    for location, accessor in (('header', 'header'), ('footer', 'footer')):
+        for section in document.sections:
+            part = getattr(section, accessor)
+            identity = id(part._element)
+            if identity in seen_parts:
+                continue
+            seen_parts.add(identity)
+            for block in part.iter_inner_content():
+                if isinstance(block, Table):
+                    append_table(block, location)
+                else:
+                    append_paragraph(block, location)
+                if len(blocks) >= _PREVIEW_BLOCK_LIMIT or total_characters >= _PREVIEW_TEXT_LIMIT:
+                    truncated = True
+                    break
+    return {'type': 'document', 'blocks': blocks, 'truncated': truncated}
+
+
+def _spreadsheet_preview_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if hasattr(value, 'isoformat'):
+        try:
+            return value.isoformat()
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
+def _xlsx_preview(data: bytes, *, keep_vba: bool) -> dict[str, Any]:
+    """Return bounded worksheet/cell data without exposing workbook scripts."""
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(io.BytesIO(data), read_only=False, data_only=False, keep_vba=keep_vba)
+    sheets: list[dict[str, Any]] = []
+    cell_count = 0
+    truncated = False
+    try:
+        for worksheet in workbook.worksheets[:_PREVIEW_SHEET_LIMIT]:
+            cells: list[dict[str, Any]] = []
+            # Iterate stored cells instead of the rectangular ``max_row`` x
+            # ``max_column`` range. A sparse workbook can declare its last cell
+            # at XFD1048576 while containing only a handful of actual values.
+            stored_cells = sorted(
+                getattr(worksheet, '_cells', {}).values(),
+                key=lambda cell: (int(cell.row), int(cell.column)),
+            )
+            for cell in stored_cells:
+                hyperlink = getattr(cell, 'hyperlink', None)
+                comment = getattr(cell, 'comment', None)
+                if cell.value is None and hyperlink is None and comment is None:
+                    continue
+                if cell_count >= _PREVIEW_CELL_LIMIT:
+                    truncated = True
+                    break
+                value = _spreadsheet_preview_value(cell.value)
+                item: dict[str, Any] = {
+                    'address': cell.coordinate,
+                    'row': cell.row,
+                    'column': cell.column,
+                    'value': value,
+                    'kind': 'formula' if cell.data_type == 'f' else 'value',
+                }
+                if hyperlink is not None and getattr(hyperlink, 'target', None):
+                    item['hyperlink'] = str(hyperlink.target)
+                if comment is not None:
+                    item['comment'], comment_clipped = _preview_text(comment.text, limit=20_000)
+                    truncated = truncated or comment_clipped
+                cells.append(item)
+                cell_count += 1
+            sheets.append({
+                'name': worksheet.title,
+                'state': worksheet.sheet_state,
+                'max_row': worksheet.max_row,
+                'max_column': worksheet.max_column,
+                'merged_ranges': [str(value) for value in worksheet.merged_cells.ranges],
+                'cells': cells,
+            })
+            if cell_count >= _PREVIEW_CELL_LIMIT:
+                break
+        if len(workbook.worksheets) > _PREVIEW_SHEET_LIMIT:
+            truncated = True
+    finally:
+        vba_archive = getattr(workbook, 'vba_archive', None)
+        if vba_archive is not None:
+            vba_archive.close()
+        workbook.close()
+    return {'type': 'spreadsheet', 'sheets': sheets, 'truncated': truncated}
+
+
+def _preview_view(data: bytes, filename: str, *, url: str,
+                  page_url_template: str | None = None) -> dict[str, Any]:
+    """Build the common source/result view contract consumed by the browser."""
+    ext = extension(filename)
+    if ext in {'txt', 'md'}:
+        text, truncated = _preview_text(extract_text(data, filename), limit=_PREVIEW_TEXT_LIMIT)
+        return {'type': 'text', 'text': text, 'truncated': truncated}
+    if ext in IMAGE_EXTENSIONS:
+        try:
+            with Image.open(io.BytesIO(data)) as opened:
+                oriented = ImageOps.exif_transpose(opened)
+                width, height = oriented.size
+        except (OSError, ValueError) as exc:
+            raise HTTPException(422, f'图片预览失败: {exc}') from exc
+        return {'type': 'image', 'url': url, 'width': width, 'height': height}
+    if ext == 'pdf':
+        import fitz
+
+        try:
+            with fitz.open(stream=data, filetype='pdf') as document:
+                page_count = document.page_count
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(422, f'PDF 预览失败: {exc}') from exc
+        return {
+            'type': 'pdf', 'page_count': page_count, 'page_url_template': page_url_template,
+            'fallback_url': url,
+        }
+    if ext == 'docx':
+        return _docx_preview(data)
+    if ext in {'xlsx', 'xlsm'}:
+        return _xlsx_preview(data, keep_vba=ext == 'xlsm')
+    raise HTTPException(415, f'不支持的文件格式: .{ext}')
+
+
+def _pdf_page_png(data: bytes, page_number: int) -> bytes:
+    import fitz
+
+    try:
+        with fitz.open(stream=data, filetype='pdf') as document:
+            if page_number < 1 or page_number > document.page_count:
+                raise HTTPException(404, 'PDF 页码不存在')
+            page = document[page_number - 1]
+            base_pixels = max(1.0, float(page.rect.width * page.rect.height))
+            scale = min(1.75, math.sqrt(3_000_000 / base_pixels))
+            scale = max(0.5, scale)
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False, colorspace=fitz.csRGB)
+            return pixmap.tobytes('png')
+    except HTTPException:
+        raise
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(422, f'PDF 页面预览失败: {exc}') from exc
+
+
+def _image_preview_png(data: bytes) -> bytes:
+    try:
+        with Image.open(io.BytesIO(data)) as opened:
+            image = ImageOps.exif_transpose(opened).convert('RGB')
+        output = io.BytesIO()
+        image.save(output, format='PNG', optimize=True)
+        return output.getvalue()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(422, f'图片预览失败: {exc}') from exc
 
 
 
@@ -1982,7 +2274,7 @@ def _validate_policy_map(value: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(policy, dict) or len(policy) > 32:
             raise HTTPException(422, f'策略格式无效: {entity_type}')
         text_action = policy.get('text_action', 'token')
-        image_action = policy.get('image_action', 'solid')
+        image_action = policy.get('image_action', 'blur')
         if text_action not in allowed_text:
             raise HTTPException(422, f'不支持的文本策略: {entity_type}')
         if image_action not in allowed_image:
@@ -2052,6 +2344,7 @@ def files_analyze(file: UploadFile = File(...)):
     warnings: list[dict[str, str]] = []
     pdf_page_count = None
     image_width = image_height = None
+    source_view: dict[str, Any] = {}
     registered = False
     try:
         (folder / 'source.bin').write_bytes(data)
@@ -2068,6 +2361,12 @@ def files_analyze(file: UploadFile = File(...)):
             text = extract_text(data, filename)
             entities = analyze(text) if text else []
 
+        source_url = f'/api/tasks/{task_id}/source-preview'
+        source_view_url = f'/api/tasks/{task_id}/source-image' if ext in IMAGE_EXTENSIONS else source_url
+        source_view = _preview_view(
+            data, filename, url=source_view_url,
+            page_url_template=f'/api/tasks/{task_id}/source-pages/{{page}}',
+        )
         manifest = content_manifest(filename, text, entities) | {
             'text': text, 'sha256': _sha256(data), 'kind': ext, 'warnings': warnings,
             'boxes': boxes,
@@ -2098,6 +2397,8 @@ def files_analyze(file: UploadFile = File(...)):
               # The analysis snapshot remains private and is consumed by the
               # masking endpoint from disk after review.
               'artifacts': []}
+    result['source_preview'] = f'/api/tasks/{task_id}/source-preview'
+    result['source_view'] = source_view
     if image_width is not None and image_height is not None:
         result.update({'image_width': image_width, 'image_height': image_height, 'boxes': boxes})
     if pdf_page_count is not None:
@@ -2204,7 +2505,8 @@ def _validated_file_review(value: FilePreviewIn | FileMaskIn) -> tuple[Path, str
         raise HTTPException(404, 'analysis not found')
     row = _task_record(value.analysis_id)
     server_filename = _safe_filename(str(row[0] or ''))
-    if extension(value.filename) != extension(server_filename):
+    requested_filename = _safe_filename(str(value.filename or server_filename))
+    if extension(requested_filename) != extension(server_filename):
         raise HTTPException(422, '文件扩展名与分析任务不一致')
     data = source.read_bytes()
     expected_hash = str(row[5] or '')
@@ -2232,15 +2534,28 @@ def _validated_file_review(value: FilePreviewIn | FileMaskIn) -> tuple[Path, str
 def files_preview(value: FilePreviewIn):
     """Generate a disposable masked preview without changing task state."""
     _load_policy_store()
-    folder, server_filename, data, _manifest, entities, boxes, request_policies = _validated_file_review(value)
+    folder, server_filename, data, manifest, entities, boxes, request_policies = _validated_file_review(value)
     try:
-        masked = mask_file(data, server_filename, str(_manifest.get('text', '')),
+        masked = mask_file(data, server_filename, str(manifest.get('text', '')),
                            entities, request_policies or policy_store, boxes)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
         raise HTTPException(422, f'文件预览失败: {exc}') from exc
     preview_id = uuid.uuid4().hex
+    preview_url = f'/api/tasks/{value.analysis_id}/previews/{preview_id}'
+    source_view = _preview_view(
+        data, server_filename,
+        url=f'/api/tasks/{value.analysis_id}/source-image' if extension(server_filename) in IMAGE_EXTENSIONS
+        else f'/api/tasks/{value.analysis_id}/source-preview',
+        page_url_template=f'/api/tasks/{value.analysis_id}/source-pages/{{page}}',
+    )
+    masked_view = _preview_view(
+        masked, server_filename,
+        url=(f'/api/tasks/{value.analysis_id}/previews/{preview_id}/image'
+             if extension(server_filename) in IMAGE_EXTENSIONS else preview_url),
+        page_url_template=f'/api/tasks/{value.analysis_id}/previews/{preview_id}/pages/{{page}}',
+    )
     preview_dir = folder / '.previews'
     preview_dir.mkdir(parents=True, exist_ok=True)
     output_name = f'{preview_id}.{extension(server_filename)}'
@@ -2253,18 +2568,19 @@ def files_preview(value: FilePreviewIn):
     response: dict[str, Any] = {
         'analysis_id': value.analysis_id,
         'preview_id': preview_id,
-        'preview_url': f'/api/tasks/{value.analysis_id}/previews/{preview_id}',
+        'preview_url': preview_url,
         'filename': server_filename,
         'media_type': _SOURCE_MEDIA_TYPES.get(extension(server_filename)) or mimetypes.guess_type(server_filename)[0] or 'application/octet-stream',
         'expires_at': expires_at,
     }
+    response['source_view'] = source_view
+    response['masked_view'] = masked_view
     if extension(server_filename) in {'txt', 'md'}:
         response['masked_text'] = masked.decode('utf-8', 'replace')
     return response
 
 
-@app.get('/api/tasks/{task_id}/previews/{preview_id}')
-def preview_artifact(task_id: str, preview_id: str):
+def _preview_record(task_id: str, preview_id: str) -> tuple[str, Path, dict[str, Any]]:
     if not re.fullmatch(r'[0-9a-f]{32}', str(preview_id), re.IGNORECASE):
         raise HTTPException(404, 'preview not found')
     row = _task_record(task_id)
@@ -2279,11 +2595,48 @@ def preview_artifact(task_id: str, preview_id: str):
     except (OSError, json.JSONDecodeError):
         raise HTTPException(404, 'preview not found') from None
     if not isinstance(metadata, dict) or float(metadata.get('expires', 0)) < time.time():
-        metadata_path.unlink(missing_ok=True); output.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
+        output.unlink(missing_ok=True)
         raise HTTPException(404, 'preview 已过期')
+    return filename, output, metadata
+
+
+def _preview_bytes(output: Path, metadata: dict[str, Any]) -> bytes:
+    try:
+        data = output.read_bytes()
+    except OSError as exc:
+        raise HTTPException(404, 'preview not found') from exc
+    expected_hash = str(metadata.get('sha256', ''))
+    if expected_hash and _sha256(data) != expected_hash:
+        raise HTTPException(409, '预览文件校验失败')
+    return data
+
+
+@app.get('/api/tasks/{task_id}/previews/{preview_id}')
+def preview_artifact(task_id: str, preview_id: str):
+    filename, output, metadata = _preview_record(task_id, preview_id)
+    _preview_bytes(output, metadata)
     media_type = _SOURCE_MEDIA_TYPES.get(extension(filename)) or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
     return FileResponse(output, filename=f'{Path(filename).stem}_预览.{extension(filename)}',
                         media_type=media_type, content_disposition_type='inline')
+
+
+@app.get('/api/tasks/{task_id}/previews/{preview_id}/image')
+def preview_image(task_id: str, preview_id: str):
+    filename, output, metadata = _preview_record(task_id, preview_id)
+    if extension(filename) not in IMAGE_EXTENSIONS:
+        raise HTTPException(404, 'image preview not found')
+    return Response(_image_preview_png(_preview_bytes(output, metadata)), media_type='image/png',
+                    headers={'Cache-Control': 'private, no-store'})
+
+
+@app.get('/api/tasks/{task_id}/previews/{preview_id}/pages/{page_number}')
+def preview_pdf_page(task_id: str, preview_id: str, page_number: int):
+    filename, output, metadata = _preview_record(task_id, preview_id)
+    if extension(filename) != 'pdf':
+        raise HTTPException(404, 'PDF preview not found')
+    return Response(_pdf_page_png(_preview_bytes(output, metadata), page_number), media_type='image/png',
+                    headers={'Cache-Control': 'private, no-store'})
 
 @app.post('/api/tasks/{task_id}/restore')
 def restore_file(task_id: str, value: RestoreFileIn):

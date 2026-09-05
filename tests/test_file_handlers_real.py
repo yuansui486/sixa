@@ -309,8 +309,8 @@ def test_pdf_masks_entities_on_their_actual_pages_and_removes_text_layer() -> No
     result_text = "\n".join(page.get_text() for page in result)
     assert "13800138000" not in result_text
     assert "a@test.com" not in result_text
-    assert "138****8000" in result_text
-    assert "***@***" in result_text
+    # Replacements are rendered into sanitized image patches rather than a
+    # searchable text layer; visual rendering is covered separately.
     assert result.page_count == 2
 
 

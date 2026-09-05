@@ -189,3 +189,154 @@ def test_real_file_fixtures_analyze_without_model_execution(monkeypatch, tmp_pat
         assert body["analysis_id"]
         assert body["filename"] == filename
 
+
+def test_preview_contract_renders_text_office_pdf_and_image(monkeypatch) -> None:
+    monkeypatch.setattr(main, "analyze", _fake_entities)
+
+    image_box = {
+        "id": "fixture-box",
+        "type": "OCR",
+        "text": "13800138000",
+        "x": 0.1,
+        "y": 0.2,
+        "width": 0.7,
+        "height": 0.4,
+        "page": 1,
+        "source": "ocr",
+        "selected": True,
+        "entity_ids": ["fixture-phone"],
+    }
+    image_entity = {
+        **_fake_entities("13800138000")[0],
+        "bbox": {key: image_box[key] for key in ("x", "y", "width", "height")},
+        "page": 1,
+        "box_ids": ["fixture-box"],
+    }
+    monkeypatch.setattr(
+        main,
+        "_analyze_image_content",
+        lambda _data, _folder: (240, 120, [image_box], [image_entity], []),
+    )
+
+    document = Document()
+    document.add_heading("客户资料", level=1)
+    document.add_paragraph("联系电话 13800138000")
+    document.add_table(rows=1, cols=2).rows[0].cells[0].text = "表格内容"
+    document.sections[0].header.paragraphs[0].text = "内部文件"
+    docx_buffer = io.BytesIO()
+    document.save(docx_buffer)
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "客户"
+    worksheet["A1"] = "联系电话"
+    worksheet["B1"] = "13800138000"
+    worksheet["C1"] = "=LEN(B1)"
+    xlsx_buffer = io.BytesIO()
+    workbook.save(xlsx_buffer)
+
+    pdf = fitz.open()
+    pdf.new_page().insert_text((72, 72), "Phone 13800138000")
+    pdf_bytes = pdf.tobytes()
+    pdf.close()
+
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (240, 120), "white").save(image_buffer, format="PNG")
+
+    fixtures = [
+        ("note.txt", "联系电话 13800138000".encode(), "text/plain", "text"),
+        (
+            "resume.docx",
+            docx_buffer.getvalue(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "document",
+        ),
+        (
+            "clients.xlsx",
+            xlsx_buffer.getvalue(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "spreadsheet",
+        ),
+        ("resume.pdf", pdf_bytes, "application/pdf", "pdf"),
+        ("scan.png", image_buffer.getvalue(), "image/png", "image"),
+    ]
+
+    client = _client()
+    for filename, content, mime, expected_type in fixtures:
+        analyzed = client.post("/api/files/analyze", files={"file": (filename, content, mime)})
+        assert analyzed.status_code == 200, f"{filename}: {analyzed.text}"
+        analysis = analyzed.json()
+        assert analysis["source_view"]["type"] == expected_type
+        assert analysis["source_preview"]
+
+        preview = client.post(
+            "/api/files/preview",
+            json={
+                "analysis_id": analysis["analysis_id"],
+                # Omitting filename is a supported way to use the immutable
+                # server-side analysis filename.
+                "entities": analysis.get("entities", []),
+                "boxes": analysis.get("boxes", []),
+                "image_override": filename.endswith(".png"),
+            },
+        )
+        assert preview.status_code == 200, f"{filename}: {preview.text}"
+        payload = preview.json()
+        assert payload["source_view"]["type"] == expected_type
+        assert payload["masked_view"]["type"] == expected_type
+
+        reopened = client.get(f"/api/tasks/{analysis['analysis_id']}/analysis")
+        assert reopened.status_code == 200, reopened.text
+        assert reopened.json()["source_view"]["type"] == expected_type
+
+        if expected_type == "image":
+            assert client.get(analysis["source_view"]["url"]).headers["content-type"] == "image/png"
+            assert client.get(payload["masked_view"]["url"]).headers["content-type"] == "image/png"
+        elif expected_type == "pdf":
+            source_page = analysis["source_view"]["page_url_template"].replace("{page}", "1")
+            masked_page = payload["masked_view"]["page_url_template"].replace("{page}", "1")
+            assert client.get(source_page).headers["content-type"] == "image/png"
+            assert client.get(masked_page).headers["content-type"] == "image/png"
+
+    doc_view = client.get(
+        f"/api/tasks/{next(item['id'] for item in client.get('/api/tasks').json()['tasks'] if item['filename'] == 'resume.docx')}/analysis"
+    ).json()["source_view"]
+    assert any(block["type"] == "table" for block in doc_view["blocks"])
+    assert any(block["location"] == "header" for block in doc_view["blocks"])
+
+    sheet_view = client.get(
+        f"/api/tasks/{next(item['id'] for item in client.get('/api/tasks').json()['tasks'] if item['filename'] == 'clients.xlsx')}/analysis"
+    ).json()["source_view"]
+    cells = sheet_view["sheets"][0]["cells"]
+    assert any(cell["address"] == "C1" and cell["kind"] == "formula" for cell in cells)
+
+
+def test_invalid_preview_page_and_tampered_preview_are_rejected(monkeypatch) -> None:
+    monkeypatch.setattr(main, "analyze", _fake_entities)
+    pdf = fitz.open()
+    pdf.new_page().insert_text((72, 72), "Phone 13800138000")
+    content = pdf.tobytes()
+    pdf.close()
+    client = _client()
+    analysis = client.post(
+        "/api/files/analyze",
+        files={"file": ("resume.pdf", content, "application/pdf")},
+    ).json()
+    assert client.get(
+        analysis["source_view"]["page_url_template"].replace("{page}", "2")
+    ).status_code == 404
+
+    preview = client.post(
+        "/api/files/preview",
+        json={
+            "analysis_id": analysis["analysis_id"],
+            "entities": analysis["entities"],
+            "boxes": analysis.get("boxes", []),
+        },
+    ).json()
+    preview_path = main.TASKS / analysis["analysis_id"] / ".previews" / (
+        f"{preview['preview_id']}.pdf"
+    )
+    preview_path.write_bytes(preview_path.read_bytes() + b"tampered")
+    page_url = preview["masked_view"]["page_url_template"].replace("{page}", "1")
+    assert client.get(page_url).status_code == 409

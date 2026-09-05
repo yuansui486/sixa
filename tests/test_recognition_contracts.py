@@ -10,6 +10,20 @@ def test_builtin_chinese_account_patterns_and_ip_boundary():
     assert not any(item["type"] == "IP_ADDRESS" and item["text"] == "1.2.3.4.5" for item in entities)
 
 
+def test_postal_code_does_not_match_hash_or_identifier_fragments():
+    # Resume PDFs commonly contain asset hashes and watermark IDs.  A six
+    # digit slice inside those identifiers is not a postal code.
+    text = "资源 hash=a8be925393d4c，文件名 resume-100000-v2，邮编100000。"
+    entities = main.analyze(text)
+    postal = [item["text"] for item in entities if item["type"] == "POSTAL_CODE"]
+    assert postal == ["100000"]
+
+
+def test_postal_code_allows_chinese_label_without_ascii_identifier_boundary():
+    entities = main.analyze("邮政编码：100080；邮编 518000")
+    assert [item["text"] for item in entities if item["type"] == "POSTAL_CODE"] == ["100080", "518000"]
+
+
 def test_custom_rule_enabled_flag_is_honored_and_persisted():
     rule_id = "fixture-rule"
     c = main.conn()
