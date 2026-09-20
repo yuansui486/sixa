@@ -12,7 +12,7 @@ Windows 安装包附带通用 MCP stdio 服务，供本机 AI 工具异步创建
 
 ## 构建和验证
 
-需要 Rust 1.88+、Node.js 和对应平台的 Tauri v2 编译工具链。Windows 本地依次执行：
+需要 Rust 1.95+、Node.js 和对应平台的 Tauri v2 编译工具链。Windows 本地依次执行：
 
 ```powershell
 npm.cmd --prefix ui ci
