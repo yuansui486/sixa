@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod auth;
+#[cfg(windows)]
+mod integration;
+#[cfg(not(windows))]
+#[path = "integration_non_windows.rs"]
 mod integration;
 
 use domain::{
@@ -541,18 +545,16 @@ fn verify_installed(
             recognition::models::inspect_model(&dir)
         }
     } else {
-        let required = &[
-            "det.onnx",
-            "cls.onnx",
-            "rec.onnx",
-            "dict.txt",
-            "ocr-config.json",
-            "onnxruntime.dll",
-        ];
         if full {
-            recognition::models::verify_model_with_required(&dir, required)
+            recognition::models::verify_model_with_required(
+                &dir,
+                recognition::models::OCR_MODEL_FILES,
+            )
         } else {
-            recognition::models::inspect_model_with_required(&dir, required)
+            recognition::models::inspect_model_with_required(
+                &dir,
+                recognition::models::OCR_MODEL_FILES,
+            )
         }
     }
 }
@@ -1010,9 +1012,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let root =
-                PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA 不可用")?)
-                    .join("LocalDesensitization");
+            let root = app.path().local_data_dir()?.join("LocalDesensitization");
             let key = storage::credential_key()?;
             let store = storage::Store::open(&root, key.clone())?;
             let concurrency = store.settings()?.concurrency;

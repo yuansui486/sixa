@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["nsis"],
+    "externalBin": ["binaries/sixa-mcp"],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "languages": ["SimpChinese"],
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

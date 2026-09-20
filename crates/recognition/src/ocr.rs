@@ -163,30 +163,14 @@ pub struct PpOcr {
 
 impl PpOcr {
     pub fn load(dir: &Path) -> Result<Self> {
-        let verified = crate::models::verify_model_with_required(
-            dir,
-            &[
-                "det.onnx",
-                "cls.onnx",
-                "rec.onnx",
-                "dict.txt",
-                "ocr-config.json",
-                "onnxruntime.dll",
-            ],
-        )?;
+        let verified =
+            crate::models::verify_model_with_required(dir, crate::models::OCR_MODEL_FILES)?;
         Self::load_verified(&verified)
     }
     pub fn load_verified(verified: &crate::models::VerifiedModel) -> Result<Self> {
-        verified.require(&[
-            "det.onnx",
-            "cls.onnx",
-            "rec.onnx",
-            "dict.txt",
-            "ocr-config.json",
-            "onnxruntime.dll",
-        ])?;
+        verified.require(crate::models::OCR_MODEL_FILES)?;
         let dir = verified.directory();
-        ort::init_from(dir.join("onnxruntime.dll"))
+        ort::init_from(crate::models::runtime_library_path(dir))
             .map_err(model_error)?
             .commit();
         let load = |name: &str| {

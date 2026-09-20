@@ -638,20 +638,21 @@ function Integration() {
   });
   const action = useAction();
   const info = integration.data;
-  const configuration = info
-    ? JSON.stringify(
-        {
-          mcpServers: {
-            sixa: {
-              command: info.executable_path,
-              args: ["serve"],
+  const configuration =
+    info?.enabled && info.executable_path
+      ? JSON.stringify(
+          {
+            mcpServers: {
+              sixa: {
+                command: info.executable_path,
+                args: ["serve"],
+              },
             },
           },
-        },
-        null,
-        2,
-      )
-    : "";
+          null,
+          2,
+        )
+      : "";
 
   const copy = (value: string, label: string) =>
     action.run(async () => {
@@ -669,7 +670,9 @@ function Integration() {
       </Heading>
       <Feedback
         {...action}
-        error={action.error || (integration.error ? message(integration.error) : "")}
+        error={
+          action.error || (integration.error ? message(integration.error) : "")
+        }
       />
       {integration.isPending ? (
         <section className="integration-loading" aria-live="polite">
@@ -678,34 +681,49 @@ function Integration() {
         </section>
       ) : info ? (
         <div className="integration-layout">
-          <section className="card integration-status" aria-labelledby="integration-status-title">
+          <section
+            className="card integration-status"
+            aria-labelledby="integration-status-title"
+          >
             <div className="toolbar">
               <h2 id="integration-status-title">接入状态</h2>
               <span className={`badge ${info.enabled ? "" : "warning-badge"}`}>
-                {info.enabled ? "默认开启" : "当前关闭"}
+                {info.enabled ? "默认开启" : "仅支持 Windows"}
               </span>
             </div>
             <div className="integration-checks">
               <StatusRow
                 ready={info.authenticated}
                 label="桌面会话"
-                detail={info.authenticated ? "已登录，可接受任务" : "需要先登录桌面应用"}
+                detail={
+                  info.authenticated
+                    ? "已登录，可接受任务"
+                    : "需要先登录桌面应用"
+                }
               />
               <StatusRow
                 ready={info.mcp_available}
                 label="MCP 程序"
-                detail={info.mcp_available ? "已随桌面应用安装" : "未找到接入程序"}
+                detail={
+                  !info.enabled
+                    ? "当前平台暂不提供"
+                    : info.mcp_available
+                      ? "已随桌面应用安装"
+                      : "未找到接入程序"
+                }
               />
               <StatusRow
                 ready={info.models_ready}
                 label="本机模型"
-                detail={info.models_ready ? "已就绪" : "需要在模型管理中完成准备"}
+                detail={
+                  info.models_ready ? "已就绪" : "需要在模型管理中完成准备"
+                }
               />
             </div>
             <button
               type="button"
               className="secondary"
-              disabled={action.busy}
+              disabled={action.busy || !info.enabled}
               onClick={() =>
                 action.run(async () => {
                   const result = await call("integration_check");
@@ -715,12 +733,18 @@ function Integration() {
                 })
               }
             >
-              <RefreshCw size={17} className={action.busy ? "spin" : undefined} />
+              <RefreshCw
+                size={17}
+                className={action.busy ? "spin" : undefined}
+              />
               本机连接自检
             </button>
           </section>
 
-          <section className="card integration-config" aria-labelledby="integration-config-title">
+          <section
+            className="card integration-config"
+            aria-labelledby="integration-config-title"
+          >
             <div className="toolbar">
               <h2 id="integration-config-title">MCP 配置</h2>
               <button
@@ -733,21 +757,37 @@ function Integration() {
                 复制配置
               </button>
             </div>
-            <p>
-              私匣在本机脱敏 PDF、Office、图片和文本文件，只向 AI 返回任务状态与结果路径，
-              不返回文件正文。将这段配置添加到 AI 工具后，请保持桌面应用运行并已登录。
-            </p>
-            <pre className="integration-code" aria-label="通用 MCP JSON 配置">
-              {configuration}
-            </pre>
+            {info.enabled ? (
+              <>
+                <p>
+                  私匣在本机脱敏 PDF、Office、图片和文本文件，只向 AI
+                  返回任务状态与结果路径，不返回文件正文。将这段配置添加到 AI
+                  工具后，请保持桌面应用运行并已登录。
+                </p>
+                <pre
+                  className="integration-code"
+                  aria-label="通用 MCP JSON 配置"
+                >
+                  {configuration}
+                </pre>
+              </>
+            ) : (
+              <p>
+                当前 macOS 版本不提供 MCP
+                sidecar；桌面文件脱敏功能可以正常使用。
+              </p>
+            )}
           </section>
 
-          <section className="card integration-details" aria-labelledby="integration-details-title">
+          <section
+            className="card integration-details"
+            aria-labelledby="integration-details-title"
+          >
             <h2 id="integration-details-title">程序信息</h2>
             <dl>
               <dt>MCP 程序路径</dt>
               <dd>
-                <code>{info.executable_path}</code>
+                <code>{info.executable_path || "当前平台未提供"}</code>
                 <button
                   type="button"
                   className="secondary icon-button"
@@ -764,7 +804,11 @@ function Integration() {
               <dt>支持格式</dt>
               <dd>{info.supported_formats.join("、")}</dd>
               <dt>调用流程</dt>
-              <dd>检查状态 → 创建任务 → 等待终态 → 获取结果路径</dd>
+              <dd>
+                {info.enabled
+                  ? "检查状态 → 创建任务 → 等待终态 → 获取结果路径"
+                  : "当前平台暂不提供 MCP 调用"}
+              </dd>
             </dl>
           </section>
         </div>

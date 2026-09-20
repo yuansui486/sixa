@@ -10,6 +10,34 @@ pub const MODEL_REPOSITORY: &str = "yuansui486/data_desensitization_0918";
 pub const MODEL_REVISION: &str = "raner-v1.0.0";
 pub const DESKTOP_MODEL_REVISION: &str = "desktop-models-v1.0.0";
 
+#[cfg(target_os = "windows")]
+pub const RANER_MODEL_FILES: &[&str] = &[
+    "emissions.onnx",
+    "tokenizer.json",
+    "crf.json",
+    "onnxruntime.dll",
+];
+#[cfg(not(target_os = "windows"))]
+pub const RANER_MODEL_FILES: &[&str] = &["emissions.onnx", "tokenizer.json", "crf.json"];
+
+#[cfg(target_os = "windows")]
+pub const OCR_MODEL_FILES: &[&str] = &[
+    "det.onnx",
+    "cls.onnx",
+    "rec.onnx",
+    "dict.txt",
+    "ocr-config.json",
+    "onnxruntime.dll",
+];
+#[cfg(not(target_os = "windows"))]
+pub const OCR_MODEL_FILES: &[&str] = &[
+    "det.onnx",
+    "cls.onnx",
+    "rec.onnx",
+    "dict.txt",
+    "ocr-config.json",
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelFile {
     pub name: String,
@@ -59,15 +87,7 @@ impl VerifiedModel {
     }
 }
 pub fn verify_model(dir: &Path) -> Result<VerifiedModel> {
-    verify_model_with_required(
-        dir,
-        &[
-            "emissions.onnx",
-            "tokenizer.json",
-            "crf.json",
-            "onnxruntime.dll",
-        ],
-    )
+    verify_model_with_required(dir, RANER_MODEL_FILES)
 }
 pub fn verify_model_with_required(dir: &Path, required: &[&str]) -> Result<VerifiedModel> {
     Ok(VerifiedModel {
@@ -76,15 +96,7 @@ pub fn verify_model_with_required(dir: &Path, required: &[&str]) -> Result<Verif
     })
 }
 pub fn inspect_model(dir: &Path) -> Result<VerifiedModel> {
-    inspect_model_with_required(
-        dir,
-        &[
-            "emissions.onnx",
-            "tokenizer.json",
-            "crf.json",
-            "onnxruntime.dll",
-        ],
-    )
+    inspect_model_with_required(dir, RANER_MODEL_FILES)
 }
 pub fn inspect_model_with_required(dir: &Path, required: &[&str]) -> Result<VerifiedModel> {
     Ok(VerifiedModel {
@@ -93,15 +105,32 @@ pub fn inspect_model_with_required(dir: &Path, required: &[&str]) -> Result<Veri
     })
 }
 pub fn verify(dir: &Path) -> Result<Manifest> {
-    verify_with_required(
-        dir,
-        &[
-            "emissions.onnx",
-            "tokenizer.json",
-            "crf.json",
-            "onnxruntime.dll",
-        ],
-    )
+    verify_with_required(dir, RANER_MODEL_FILES)
+}
+
+#[cfg(target_os = "windows")]
+pub fn runtime_library_path(model_dir: &Path) -> PathBuf {
+    model_dir.join("onnxruntime.dll")
+}
+
+#[cfg(target_os = "macos")]
+pub fn runtime_library_path(model_dir: &Path) -> PathBuf {
+    let local = model_dir.join("libonnxruntime.dylib");
+    if local.is_file() {
+        return local;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.parent()
+                .map(|directory| directory.join("../Resources/libonnxruntime.dylib"))
+        })
+        .unwrap_or(local)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn runtime_library_path(model_dir: &Path) -> PathBuf {
+    model_dir.join("libonnxruntime.so")
 }
 
 pub fn verify_with_required(dir: &Path, required: &[&str]) -> Result<Manifest> {

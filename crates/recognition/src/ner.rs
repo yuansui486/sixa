@@ -98,14 +98,9 @@ impl Raner {
         Self::load_verified(&verified)
     }
     pub fn load_verified(verified: &crate::models::VerifiedModel) -> Result<Self> {
-        verified.require(&[
-            "emissions.onnx",
-            "tokenizer.json",
-            "crf.json",
-            "onnxruntime.dll",
-        ])?;
+        verified.require(crate::models::RANER_MODEL_FILES)?;
         let dir = verified.directory();
-        ort::init_from(dir.join("onnxruntime.dll"))
+        ort::init_from(crate::models::runtime_library_path(dir))
             .map_err(err)?
             .commit();
         let session = Session::builder()

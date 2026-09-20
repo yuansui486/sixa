@@ -1,0 +1,170 @@
+name: 构建并发布安装包
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的现有标签，例如 v1.0.0"
+        required: true
+        default: "v1.0.0"
+      publish:
+        description: "构建成功后发布 GitHub Release"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64 (NSIS)
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+            artifact: sixa-windows-x64
+            artifact_path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          - name: macOS Intel (DMG)
+            os: macos-14
+            target: x86_64-apple-darwin
+            bundle: dmg
+            artifact: sixa-macos-x64
+            artifact_path: target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          - name: macOS Apple Silicon (DMG)
+            os: macos-14
+            target: aarch64-apple-darwin
+            bundle: dmg
+            artifact: sixa-macos-arm64
+            artifact_path: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+          targets: ${{ matrix.target }}
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: 配置 Windows 构建环境
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 配置 macOS 构建环境
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "$GITHUB_ENV"
+
+      - name: 安装前端依赖
+        run: npm ci --prefix ui
+
+      - name: 构建 Windows MCP sidecar
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p sixa-mcp --target ${{ matrix.target }}
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          Copy-Item -LiteralPath "target/${{ matrix.target }}/release/sixa-mcp.exe" -Destination "src-tauri/binaries/sixa-mcp-${{ matrix.target }}.exe" -Force
+
+      - name: 准备 macOS ONNX Runtime
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/onnxruntime-osx-universal2-1.22.0.tgz"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-universal2-1.22.0.tgz"
+          echo "cfa6f6584d87555ed9f6e7e8a000d3947554d589efe3723b8bfa358cd263d03c  $archive" | shasum -a 256 --check
+          mkdir -p src-tauri/runtime
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          cp -L \
+            "$RUNNER_TEMP/onnxruntime-osx-universal2-1.22.0/lib/libonnxruntime.dylib" \
+            src-tauri/runtime/libonnxruntime.dylib
+          cp \
+            "$RUNNER_TEMP/onnxruntime-osx-universal2-1.22.0/LICENSE" \
+            src-tauri/runtime/ONNXRuntime-LICENSE.txt
+          cp \
+            "$RUNNER_TEMP/onnxruntime-osx-universal2-1.22.0/ThirdPartyNotices.txt" \
+            src-tauri/runtime/ONNXRuntime-ThirdPartyNotices.txt
+
+      - name: 构建安装程序
+        run: npx --prefix ui tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+
+      - name: 保存安装程序
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: 发布 GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 下载全部安装程序
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: 发布 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
+        run: |
+          (
+            cd release-assets
+            find . -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+          ) > release-assets/SHA256SUMS.txt
+          cat > release-notes.md <<'EOF'
+          私匣是本机数据脱敏桌面应用。本次 Release 提供：
+
+          - Windows 10/11 x64 NSIS 安装程序
+          - macOS 11+ Intel DMG 安装程序
+          - macOS 11+ Apple Silicon DMG 安装程序
+
+          安装程序当前未进行商业代码签名。macOS 首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.22.0 universal2 运行库。
+          EOF
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --title "私匣 $RELEASE_TAG" \
+              --notes-file release-notes.md \
+              --latest
+          fi

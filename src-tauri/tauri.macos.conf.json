@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["dmg"],
+    "resources": {
+      "runtime/libonnxruntime.dylib": "libonnxruntime.dylib",
+      "runtime/ONNXRuntime-LICENSE.txt": "ONNXRuntime-LICENSE.txt",
+      "runtime/ONNXRuntime-ThirdPartyNotices.txt": "ONNXRuntime-ThirdPartyNotices.txt"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}
