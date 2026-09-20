@@ -123,7 +123,7 @@ jobs:
         run: npx --prefix ui tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
 
       - name: 保存安装程序
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact_path }}
@@ -140,7 +140,7 @@ jobs:
 
     steps:
       - name: 下载全部安装程序
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
