@@ -10,6 +10,8 @@
 
 2026-09-20 商业品牌确定为“私匣”，英文开发名为 `Sixa`。桌面程序、MCP sidecar、包名、命名管道和应用标识统一使用 `sixa`；旧 `%LOCALAPPDATA%\LocalDesensitization\` 数据目录和 Credential Manager 兼容标识继续保留。新 Logo 使用文件进入半封闭匣盒的图形，不再使用通用盾牌图标。
 
+2026-09-20 完成 MCP 中文元数据与 AI 调用闭环。支持中文元数据的客户端显示“私匣 · 本机文件脱敏”，通用配置使用稳定键 `sixa`；服务和六项工具提供中文标题、简介、输入输出 Schema 及只读/幂等注解。创建、等待、取消和错误结果均返回可执行的 `next_action` 或恢复操作；创建请求通信失败时明确标记结果未知并禁止自动重试，避免生成重复任务。桌面“本机连接自检”按 MCP 初始化顺序实际启动 sidecar，并依次检查初始化、工具清单和状态调用。
+
 ## 交付结果
 
 | 范围 | 当前实现 |
@@ -38,7 +40,7 @@ Rust workspace 为 `domain`、`recognition`、`formats`、`storage`、`model-man
 
 ## 已执行验证
 
-- Rust workspace：63 项测试通过；覆盖状态机、Unicode/proptest、安全正则、NER/CTC/Viterbi、图片及多页 TIFF、方向绘制、PDF 两种模式、OOXML、任务加密、恢复包、数据库迁移、坏记录隔离、并发 SQLite 写入、批量、取消、MCP 协议、并发输出避重、路径校验和任务状态清理。`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+- Rust workspace 与 Tauri：73 项测试通过；覆盖状态机、Unicode/proptest、安全正则、NER/CTC/Viterbi、图片及多页 TIFF、方向绘制、PDF 两种模式、OOXML、任务加密、恢复包、数据库迁移、坏记录隔离、并发 SQLite 写入、批量、取消、MCP 中文元数据、AI 调用闭环、错误恢复、创建结果未知保护、并发输出避重、路径校验和任务状态清理。`cargo clippy --workspace --all-targets -- -D warnings` 通过。
 - Python 差分基线（清理前历史记录）：112 passed，2 skipped。旧实现已按用户决定移除；现有 Rust 黄金样本保留。
 - RaNER 黄金差分：7 个样本、15 个实体，span/type 一致，FP32 分数误差不超过 `1e-4`。
 - PP-OCRv4 黄金差分：mobile 与 accurate 均为 4/4 文本和阅读顺序一致；最小 polygon IoU 分别为 `0.8576887519`、`0.9103483793`。
@@ -48,16 +50,16 @@ Rust workspace 为 `domain`、`recognition`、`formats`、`storage`、`model-man
 - Office 验收：DOCX/XLSX/XLSM 敏感文字移除，三者内嵌媒体均变化；真实 Excel 生成且含 VBA 项目的 XLSM 保持 `vbaProject.bin` SHA-256 不变；三个输出通过 `officecli validate`，并由 Microsoft Word/Excel 原生打开和回读。LibreOffice 未安装。
 - ModelScope：真实网络取消、续传、校验和安装通过。
 - 前端：Vitest 4 项、TypeScript/Vite production build、Playwright Chromium 两种桌面尺寸 20 项通过；覆盖中文复核流程、模型错误阻断、高级设置、恢复口令确认、AI 接入配置和紧凑桌面布局。
-- MCP 真实链路：stdio 初始化、命名管道状态、TXT 创建/等待/导出和运行中取消通过；源文件及预先存在的同名输出保持不变，手机号和邮箱均被脱敏，报告不含正文或实体值。测试结束后已退出租户会话。
+- MCP 真实链路：release sidecar 的 stdio 初始化、中文服务信息、六项工具元数据和命名管道状态调用通过；此前 TXT 创建/等待/导出和运行中取消验收继续有效。源文件及预先存在的同名输出保持不变，手机号和邮箱均被脱敏，报告不含正文或实体值。测试结束后已退出租户会话。
 - Windows 包：x64 NSIS 构建通过；本机静默安装后同时存在主程序与 MCP sidecar；从安装目录启动、sidecar 状态调用、无 TCP 监听、静默卸载及目录清理通过。
 
 ## 构建和测量
 
 - NSIS：`target/release/bundle/nsis/私匣_1.0.0_x64-setup.exe`
-- 安装包：9,518,880 字节，SHA-256 `4564369657c3c211721b2f57366cd4170d141be15c901f517b078a88703dcddc`
-- 主程序 `sixa.exe`：29,227,520 字节，SHA-256 `17f888aa8a7463ba7a80295baca96057403ecca77fbb77a5cf1e9c3dab162395`
-- MCP sidecar `sixa-mcp.exe`：3,238,400 字节，SHA-256 `6cfab324e0a02b7042ea8362f2ab8e17679ee70a6566c302a6b054d919970b35`
-- 本机静默安装文件总量：32,580,756 字节，不含按需下载模型和 `%LOCALAPPDATA%` 任务数据
+- 安装包：9,577,104 字节，SHA-256 `33f5b3073785a206b52e97799d6a6f500faa1a496dcbc9a54c0b7c3e7a1ca32c`
+- 主程序 `sixa.exe`：29,328,896 字节，SHA-256 `6d2f779eeea29c5a08e429dc13eb58c40eae209b6983335db73bf6ba159a9272`
+- MCP sidecar `sixa-mcp.exe`：3,426,816 字节，SHA-256 `092dd7357f5a2d7c58178d25621c0f3f0cae066547b920d889d33f2bdb8412d6`
+- 上一构建本机静默安装文件总量：32,580,756 字节，不含按需下载模型和 `%LOCALAPPDATA%` 任务数据；本次重建保留现有 `D:\私匣` 安装，未覆盖测量
 - 安装版启动后 8 秒采样：主进程工作集约 26.7 MiB、峰值约 26.7 MiB；不含 WebView2 子进程及后续模型会话
 - 六份私有简历 accurate 验收：单案例 568,981-1,285,052 ms；验收进程采样峰值工作集 3,403 MiB。该数据受页面内容和本机构建并发影响，不作为正式客户性能承诺
 

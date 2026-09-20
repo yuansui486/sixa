@@ -665,7 +665,7 @@ function Integration() {
   return (
     <>
       <Heading title="AI 工具接入">
-        让支持 MCP 的本机 AI 工具调用脱敏能力。
+        让支持 MCP 的本机 AI 工具安全调用私匣处理文件。
       </Heading>
       <Feedback
         {...action}
@@ -734,7 +734,8 @@ function Integration() {
               </button>
             </div>
             <p>
-              将这段配置添加到 AI 工具的 MCP 配置中。桌面应用需要保持运行并已登录。
+              私匣在本机脱敏 PDF、Office、图片和文本文件，只向 AI 返回任务状态与结果路径，
+              不返回文件正文。将这段配置添加到 AI 工具后，请保持桌面应用运行并已登录。
             </p>
             <pre className="integration-code" aria-label="通用 MCP JSON 配置">
               {configuration}
@@ -762,6 +763,8 @@ function Integration() {
               <dd>{info.protocol_version}</dd>
               <dt>支持格式</dt>
               <dd>{info.supported_formats.join("、")}</dd>
+              <dt>调用流程</dt>
+              <dd>检查状态 → 创建任务 → 等待终态 → 获取结果路径</dd>
             </dl>
           </section>
         </div>

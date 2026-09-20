@@ -1,6 +1,8 @@
 # AI 工具接入
 
-私匣安装包会同时安装桌面应用和 `sixa-mcp.exe`。MCP 程序是标准输入输出服务器，不监听 HTTP 端口，也不会修改系统 `PATH`。在桌面应用的“AI 工具接入”页可以复制当前安装路径和通用配置：
+私匣是本机文件脱敏工具，支持 PDF、Office、图片和文本文件。安装包会同时安装桌面应用和 `sixa-mcp.exe`。MCP 程序通过标准输入输出与 AI 工具通信，不监听 HTTP 端口，也不会修改系统 `PATH`。AI 只会收到任务状态、统计信息和结果路径，不会收到文件正文或识别出的实体值。
+
+在桌面应用的“AI 工具接入”页可以复制当前安装路径和通用配置：
 
 ```json
 {
@@ -13,7 +15,20 @@
 }
 ```
 
-调用前需要保持私匣运行、登录已授权的租户账号，并完成所需模型加载。MCP 进程只负责协议转换；任务实际由桌面进程执行，使用桌面中当前启用的识别规则和脱敏方式。
+`sixa` 是稳定的配置键，避免部分客户端把中文键拼入工具命名空间时出现兼容问题。支持 MCP 中文元数据的客户端会显示服务标题“私匣 · 本机文件脱敏”和各工具的中文名称。程序文件和工具机器名继续使用英文。调用前需要保持私匣运行、登录已授权的租户账号，并完成所需模型加载。MCP 进程只负责协议转换；任务实际由桌面进程执行，使用桌面中当前启用的识别规则和脱敏方式。
+
+## AI 调用流程
+
+AI 客户端应按以下顺序调用，确保耗时较长的 OCR、PDF 和批量任务能够完整执行：
+
+1. 调用 `desensitization_status`。只有桌面会话、租户授权和所需模型全部就绪后才能创建任务。
+2. 调用 `desensitize_file` 或 `desensitize_batch`，保存响应中的 `job_id`。创建成功只表示任务已进入队列。
+3. 使用同一个 `job_id` 反复调用 `wait_desensitization_job`，建议每次等待 60 秒。等待超时不代表任务失败，应继续调用等待工具，不要重复创建任务。
+4. 遇到 `queued`、`analyzing`、`generating` 或 `exporting` 时继续等待；遇到 `completed`、`partial`、`failed` 或 `cancelled` 时停止等待。
+5. `completed` 时向用户提供输出文件和报告路径；`partial` 时明确说明只有部分文件成功，并同时提供输出和报告路径；`failed` 时说明错误和建议的恢复操作。
+6. 用户要求取消时调用 `cancel_desensitization_job`，随后继续等待，直到任务进入 `cancelled` 或其他结束状态。
+
+AI 不应自行扫描目录、猜测文件路径或处理用户没有明确指定的文件，也不应声称已经读取、检查或验证了脱敏后的正文。
 
 ## 工具
 
@@ -30,22 +45,24 @@
 
 单文件默认命名为 `原文件名_已脱敏.扩展名`，批量结果默认命名为 `批量_已脱敏.zip`。源文件和已有结果不会被覆盖；名称冲突时自动追加 `(2)`、`(3)`。同目录还会生成只含任务状态、实体类型计数和输出路径的 JSON 报告，不包含正文或识别出的实体值。
 
-任务状态包括 `queued`、`analyzing`、`generating`、`exporting`、`completed`、`partial`、`failed` 和 `cancelled`。调用方应保存创建接口返回的 `job_id`，使用 `wait_desensitization_job` 长轮询，直到进入结束状态。桌面只保留最近 256 个已结束的 MCP 任务状态；输出文件和桌面任务历史不受此内存上限影响。
+任务状态包括 `queued`、`analyzing`、`generating`、`exporting`、`completed`、`partial`、`failed` 和 `cancelled`。桌面只保留最近 256 个已结束的 MCP 任务状态；输出文件和桌面任务历史不受此内存上限影响。
 
 ## 错误码
 
 | 错误码 | 处理方式 |
 | --- | --- |
-| `APP_NOT_RUNNING` | 启动私匣 |
-| `AUTH_REQUIRED` | 在私匣中登录 |
-| `AUTH_EXPIRED` | 联网刷新登录和租户授权 |
-| `MODELS_NOT_READY` | 在模型管理中安装并加载对应模型 |
-| `INVALID_PATH` | 使用存在且可访问的绝对路径 |
-| `UNSUPPORTED_FORMAT` | 改用状态接口返回的支持格式 |
-| `PROTOCOL_MISMATCH` | 更新桌面应用及随附的 MCP 程序 |
-| `JOB_NOT_FOUND` | 检查 `job_id`，或重新创建已过期任务 |
-| `TASK_FAILED` | 查看错误信息并在桌面任务历史中检查详情 |
-| `CANCELLED` | 任务已按请求停止 |
+| `APP_NOT_RUNNING` | 启动私匣，等待桌面应用就绪后重新检查状态 |
+| `AUTH_REQUIRED` | 在私匣中登录，再重新检查状态 |
+| `AUTH_EXPIRED` | 联网刷新登录和租户授权，再重新检查状态 |
+| `MODELS_NOT_READY` | 在“模型管理”中准备对应模型，再重新检查状态 |
+| `INVALID_PATH` | 请用户提供存在且可访问的绝对路径；不要自行扫描目录 |
+| `UNSUPPORTED_FORMAT` | 根据状态工具返回的支持格式，请用户更换文件 |
+| `PROTOCOL_MISMATCH` | 安装同一版本的私匣桌面应用和 MCP 程序 |
+| `JOB_NOT_FOUND` | 核对保存的 `job_id` 和已有输出；不要直接重复创建任务 |
+| `TASK_FAILED` | 告知用户错误信息，并建议在桌面任务历史中检查详情 |
+| `CANCELLED` | 告知用户任务已停止，不会生成新的完整结果 |
+
+错误结果中的 `retryable` 表示完成 `recovery_action` 后是否适合重试原调用。创建任务时若 `outcome_unknown` 为 `true`，桌面可能已经成功入队；AI 必须先请用户检查任务历史和输出目录，不得自动重复调用 `desensitize_file` 或 `desensitize_batch`。取消调用通信失败时先查询原 `job_id`，仍在运行才再次取消。
 
 ## 本机安全边界
 

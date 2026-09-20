@@ -533,6 +533,14 @@ test("AI 工具接入展示状态、复制配置并完成本机自检", async ({
   await expect(page.getByLabel("通用 MCP JSON 配置")).toContainText(
     '"sixa"',
   );
+  await expect(
+    page.getByText("只向 AI 返回任务状态与结果路径", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("检查状态 → 创建任务 → 等待终态 → 获取结果路径", {
+      exact: true,
+    }),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "复制配置" }).click();
   await expect(page.getByRole("status")).toContainText("MCP 配置已复制");

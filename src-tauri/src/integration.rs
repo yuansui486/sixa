@@ -1,10 +1,9 @@
 use crate::{AppState, job, poisoned, register_run, unregister_run};
 use domain::{Error, Result, TaskOptions, TaskState};
 use integration_protocol::{
-    CancelJobResult, CreateJobResult, DesensitizeBatchParams, DesensitizeFileParams, EmptyParams,
-    ErrorCode, IntegrationError, JobParams, JobResult, JobState, MAX_FRAME_BYTES, Method,
-    PIPE_PREFIX, PROTOCOL_VERSION, Request, Response, StatusResult, WaitJobParams, decode_frame,
-    encode_frame,
+    CancelJobResult, CreateJobResult, DesensitizeBatchParams, DesensitizeFileParams, ErrorCode,
+    IntegrationError, JobParams, JobResult, JobState, MAX_FRAME_BYTES, Method, PIPE_PREFIX,
+    PROTOCOL_VERSION, Request, Response, StatusResult, WaitJobParams,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -14,11 +13,12 @@ use std::{
     fs::OpenOptions,
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tauri::{AppHandle, Manager, State};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
 const SUPPORTED_FORMATS: &[&str] = &[
@@ -178,72 +178,178 @@ pub async fn integration_check() -> IntegrationCheck {
             message: format!("未找到 MCP 程序：{}", executable.display()),
         };
     }
-    let status = tokio::time::timeout(Duration::from_secs(5), pipe_status()).await;
-    match status {
-        Ok(Ok(status)) if !status.authenticated || !status.authorization_valid => {
-            IntegrationCheck {
-                ok: false,
-                message: "请先登录桌面应用并确认租户授权".into(),
-            }
-        }
-        Ok(Ok(status)) if !status.models_ready => IntegrationCheck {
-            ok: false,
-            message: "模型尚未就绪".into(),
-        },
-        Ok(Ok(_)) => IntegrationCheck {
+    match tokio::time::timeout(Duration::from_secs(8), mcp_stdio_check(&executable)).await {
+        Ok(Ok(())) => IntegrationCheck {
             ok: true,
-            message: "命名管道连接正常，AI 工具接入已就绪".into(),
+            message: "MCP 初始化、工具清单和桌面状态调用均正常，AI 工具接入已就绪".into(),
         },
-        Ok(Err(error)) => IntegrationCheck {
-            ok: false,
-            message: format!("命名管道连接失败：{}", error.message),
-        },
+        Ok(Err(message)) => IntegrationCheck { ok: false, message },
         Err(_) => IntegrationCheck {
             ok: false,
-            message: "命名管道连接超时，请重启桌面应用后重试".into(),
+            message: "MCP 完整链路自检超时，请重启私匣后重试".into(),
         },
     }
 }
 
-async fn pipe_status() -> std::result::Result<StatusResult, IntegrationError> {
-    use tokio::net::windows::named_pipe::ClientOptions;
+async fn mcp_stdio_check(executable: &Path) -> std::result::Result<(), String> {
+    let mut child = tokio::process::Command::new(executable)
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("无法启动 MCP 程序：{error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "无法连接 MCP 标准输入".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法连接 MCP 标准输出".to_owned())?;
+    let mut lines = BufReader::new(stdout).lines();
+    let result = async {
+        write_mcp_message(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "sixa-desktop-self-test", "version": env!("CARGO_PKG_VERSION")}
+                }
+            }),
+        )
+        .await?;
+        let initialize = read_mcp_response(&mut lines, 1).await?;
+        let server = &initialize["result"]["serverInfo"];
+        if initialize["result"]["protocolVersion"] != "2025-06-18"
+            || server["name"] != "sixa"
+            || server["title"] != "私匣 · 本机文件脱敏"
+            || server["version"] != env!("CARGO_PKG_VERSION")
+        {
+            return Err("MCP 服务名称或中文标题不匹配，请重新安装私匣".into());
+        }
 
-    let request = Request::new(Method::Status, &EmptyParams::default())
-        .map_err(|error| IntegrationError::new(ErrorCode::ProtocolMismatch, error.to_string()))?;
-    let request_id = request.id.clone();
-    let mut pipe = ClientOptions::new()
-        .open(pipe_name().map_err(|message| IntegrationError::new(ErrorCode::TaskFailed, message))?)
-        .map_err(|error| IntegrationError::new(ErrorCode::AppNotRunning, error.to_string()))?;
-    let frame = encode_frame(&request)
-        .map_err(|error| IntegrationError::new(ErrorCode::ProtocolMismatch, error.to_string()))?;
-    pipe.write_all(&frame)
-        .await
-        .map_err(|error| IntegrationError::new(ErrorCode::TaskFailed, error.to_string()))?;
-    pipe.flush()
-        .await
-        .map_err(|error| IntegrationError::new(ErrorCode::TaskFailed, error.to_string()))?;
-    let mut prefix = [0_u8; 4];
-    pipe.read_exact(&mut prefix)
-        .await
-        .map_err(|error| IntegrationError::new(ErrorCode::TaskFailed, error.to_string()))?;
-    let length = u32::from_le_bytes(prefix) as usize;
-    if length == 0 || length > MAX_FRAME_BYTES {
-        return Err(IntegrationError::new(
-            ErrorCode::ProtocolMismatch,
-            "桌面服务返回的数据帧长度无效",
-        ));
+        write_mcp_message(
+            &mut stdin,
+            &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await?;
+        write_mcp_message(
+            &mut stdin,
+            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        )
+        .await?;
+        let tools_response = read_mcp_response(&mut lines, 2).await?;
+        let tools = tools_response["result"]["tools"]
+            .as_array()
+            .ok_or_else(|| "MCP 工具清单格式无效".to_owned())?;
+        let required = [
+            "desensitization_status",
+            "desensitize_file",
+            "desensitize_batch",
+            "get_desensitization_job",
+            "wait_desensitization_job",
+            "cancel_desensitization_job",
+        ];
+        for name in required {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .ok_or_else(|| format!("MCP 缺少工具：{name}"))?;
+            if tool["title"].as_str().is_none()
+                || tool["description"].as_str().is_none()
+                || !tool["outputSchema"].is_object()
+                || !tool["annotations"].is_object()
+            {
+                return Err(format!("MCP 工具元数据不完整：{name}"));
+            }
+        }
+
+        write_mcp_message(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "desensitization_status", "arguments": {}}
+            }),
+        )
+        .await?;
+        let status_response = read_mcp_response(&mut lines, 3).await?;
+        let tool_result = &status_response["result"];
+        let status = &tool_result["structuredContent"];
+        if tool_result["isError"] == true {
+            let message = status["recovery_action"]
+                .as_str()
+                .or_else(|| status["message"].as_str())
+                .unwrap_or("状态调用失败");
+            return Err(format!("MCP 状态调用失败：{message}"));
+        }
+        if status["authenticated"] != true || status["authorization_valid"] != true {
+            return Err("请先在私匣中登录并确认租户已开通本地数据脱敏功能".into());
+        }
+        if status["models_ready"] != true || status["ready"] != true {
+            return Err("本机模型尚未就绪，请先在模型管理页完成准备".into());
+        }
+        if status["protocol_version"] != PROTOCOL_VERSION || !status["supported_formats"].is_array()
+        {
+            return Err("MCP 与桌面应用的协议或支持格式信息不完整，请重新安装私匣".into());
+        }
+        Ok(())
     }
-    let mut frame = Vec::with_capacity(length + 4);
-    frame.extend_from_slice(&prefix);
-    frame.resize(length + 4, 0);
-    pipe.read_exact(&mut frame[4..])
+    .await;
+
+    drop(stdin);
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    result
+}
+
+async fn write_mcp_message<W>(writer: &mut W, message: &Value) -> std::result::Result<(), String>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    writer
+        .write_all(format!("{message}\n").as_bytes())
         .await
-        .map_err(|error| IntegrationError::new(ErrorCode::TaskFailed, error.to_string()))?;
-    let response: Response = decode_frame(&frame)
-        .map_err(|error| IntegrationError::new(ErrorCode::ProtocolMismatch, error.to_string()))?;
-    response
-        .decode_result(&request_id)
-        .map_err(|error| IntegrationError::new(ErrorCode::ProtocolMismatch, error.to_string()))
+        .map_err(|error| format!("写入 MCP 请求失败：{error}"))?;
+    writer
+        .flush()
+        .await
+        .map_err(|error| format!("提交 MCP 请求失败：{error}"))
+}
+
+async fn read_mcp_response<R>(
+    lines: &mut tokio::io::Lines<BufReader<R>>,
+    expected_id: u64,
+) -> std::result::Result<Value, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    loop {
+        let line = lines
+            .next_line()
+            .await
+            .map_err(|error| format!("读取 MCP 响应失败：{error}"))?
+            .ok_or_else(|| "MCP 程序提前退出".to_owned())?;
+        let response: Value = serde_json::from_str(&line)
+            .map_err(|error| format!("MCP 响应不是有效 JSON：{error}"))?;
+        let Some(id) = response.get("id") else {
+            continue;
+        };
+        if id != expected_id {
+            return Err(format!("MCP 响应标识不匹配，期望 {expected_id}，实际 {id}"));
+        }
+        if let Some(error) = response.get("error") {
+            return Err(format!("MCP 协议调用失败：{error}"));
+        }
+        return Ok(response);
+    }
 }
 
 pub fn start(app: AppHandle) -> Result<()> {
