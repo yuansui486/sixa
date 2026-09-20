@@ -1,0 +1,1 @@
+{"identifier":"desktop","description":"本地窗口及原生文件选择器","windows":["main"],"permissions":["core:default","dialog:allow-open","dialog:allow-save"]}

@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/domain", "crates/recognition", "crates/formats", "crates/storage", "crates/model-manager", "crates/task-engine", "crates/integration-protocol", "crates/mcp-server", "src-tauri"]
+default-members = ["crates/domain", "crates/recognition", "crates/formats", "crates/storage", "crates/model-manager", "crates/task-engine", "crates/integration-protocol", "crates/mcp-server"]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+rust-version = "1.88"
+
+[workspace.dependencies]
+domain = { path = "crates/domain" }
+recognition = { path = "crates/recognition" }
+formats = { path = "crates/formats" }
+storage = { path = "crates/storage" }
+task-engine = { path = "crates/task-engine" }
+model-manager = { path = "crates/model-manager" }
+integration-protocol = { path = "crates/integration-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+tempfile = "3"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }

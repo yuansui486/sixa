@@ -1,67 +1,25 @@
-# 本地数据脱敏系统
+# 私匣 Sixa
 
-一个只在本机处理文件的中文数据脱敏平台。后端使用 FastAPI，`uv` 管理环境；Presidio 的 `RecognizerResult` 作为统一实体协议，并由 `AnonymizerEngine` 执行文本实体替换；规则识别和中文 RaNER NER 共同提供文本实体，PaddleOCR 负责图片及扫描 PDF 的文字框识别。默认只监听 `127.0.0.1:8765`，上传内容不会发送到远程服务。
+私匣是一款 Windows 10/11 x64 本机数据脱敏桌面应用，英文开发名为 Sixa。应用基于 Tauri v2、Rust 和 React 18 / TypeScript，按 AGPL-3.0-or-later 发布。客户安装包不依赖 Python，不开放本机 HTTP 端口；仅前端开发服务器监听 `127.0.0.1:1420`。
 
-## 启动
+支持 TXT/Markdown、PNG/JPEG/BMP/多页 TIFF、DOCX、XLSX/XLSM 和 PDF。工作台提供实体与区域复核、手工框选、结果预览、脱敏导出和加密恢复；还支持批量、历史、识别规则、脱敏方式和模型管理。PDF 提供安全重建与 MuPDF 保真模式；Office 保留 XLSM 的 VBA 原字节并报告移除的失效签名。
 
-```powershell
-uv sync --extra ai --extra ocr --extra dev
-.\run.ps1
-```
+私匣使用 Smart Ops 租户用户登录，租户需单独开通“本地数据脱敏”模块。设备会话每 10 分钟在线校验一次，网络中断后可继续使用最近一次签发的 24 小时离线租约。账号、租户和设备授权通过 HTTPS 校验；待处理文件、识别内容、任务历史和规则不会发送到认证服务器。会话令牌保存在 Windows Credential Manager，不进入 WebView 或浏览器存储。
 
-打开 http://127.0.0.1:8765 。接口文档位于 `/docs`。
+安装包附带通用 MCP stdio 服务，供本机 AI 工具异步创建、查询、等待和取消脱敏任务。桌面应用必须保持运行并已登录；MCP 通过当前 Windows 用户专属的命名管道通信，不开放 HTTP 端口，也不修改 `PATH`。外部调用使用桌面中现有规则和脱敏方式，只返回任务状态、计数及输出路径，不返回正文或实体值。配置和工具说明见 [AI 工具接入](docs/ai-mcp-integration.md)。
 
-## 中文模型与 OCR
+首次启动自动安装 RaNER 与轻量 PP-OCRv4；高精度 OCR 可在模型管理页按需安装。模型从固定版本的 [ModelScope 仓库](https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/tags/desktop-models-v1.0.0) 下载，支持中断续传。安装包及解压结果执行 SHA-256 校验；后续启动只检查清单和必需文件。第一套模型加载后工作台即可使用，其他 worker 在后台预热，预热完成前只调度已就绪的 worker。模型页提供手动完整校验和确认后清空单个模型目录并重新下载的“重建模型”。文件内容损坏可能在加载时才报错；对应分析会被阻止。桌面数据继续保存在兼容目录 `%LOCALAPPDATA%\LocalDesensitization\`，升级到私匣后不会重复下载模型或丢失现有任务。
 
-RaNER 模型使用 ModelScope 标识 `iic/nlp_raner_named-entity-recognition_chinese-base-generic`。图片和扫描 PDF 使用 PaddleOCR **2.10.0**（配套 PaddlePaddle 3.0.0 CPU wheel），模型文件保存在项目 `models/` 或 Paddle 的本机缓存目录。首次点击“初始化 RaNER / OCR”会下载模型，耗时和磁盘占用取决于网络速度。
+## 构建和验证
 
-系统启动时会自动加载或下载 RaNER 与 PaddleOCR。只有两个模型都就绪后，文本、Office、PDF 和图片的分析、预览、脱敏接口才会开放；模型下载、初始化或推理异常时接口返回 `MODELS_NOT_READY`，不会退回仅靠正则识别的保底模式。扫描 PDF 还会校验每个需要 OCR 的页面；若出现 OCR 失败、页数超限或空识别结果，服务会拒绝生成脱敏文件，避免返回仍含原图文字的“假成功”结果。
-
-Windows CPU 环境的 OCR 推理固定在单线程 worker，并显式关闭 oneDNN/MKL-DNN。若本机已有冲突的 Paddle wheel，请按项目锁定版本重新同步：
+需要 Rust 1.88+、Node.js 和 Windows Tauri v2 所需的编译工具链。依次执行：
 
 ```powershell
-uv sync --extra ai --extra ocr --extra dev
+npm.cmd --prefix ui ci
+./tools/verify-desktop.ps1
+./tools/build-desktop.ps1
 ```
 
-## 最终版文件与批量能力
+NSIS 安装包输出到 `target/release/bundle/nsis/`，并包含 `sixa-mcp.exe`。开发时可分别运行 `npm.cmd --prefix ui run dev` 与 `cargo run -p sixa`。模型的本地离线安装入口为 `tools/install-local-model.ps1`，默认读取已转换的 ONNX 模型目录。品牌与开发命名规范见 [私匣品牌说明](docs/brand.md)。
 
-- 支持 TXT/Markdown、DOCX、XLSX/XLSM、PDF、PNG/JPEG/BMP/TIFF；输出保留原扩展名的脱敏文件。
-- Excel 扫描可见/隐藏工作表、单元格、公式、批注、超链接和定义名称；XLSM 保留宏包但不会执行宏。
-- PDF 自动区分文字页和扫描页，扫描页使用 PaddleOCR 后进行页面遮盖。
-- 图片支持 OCR 框复核、手工框和按实体类型选择模糊、像素化或纯色遮盖。
-- 批量接口默认每批 20 个文件、总计 500 MB，失败项跳过并生成 ZIP 与 `report.json`；待复核批次在刷新页面后可以从批量页或任务历史继续。
-- 可逆模式默认关闭；开启后使用用户口令通过 scrypt + AES-GCM 加密本地映射和原始文件。
-
-当前不直接解析旧式二进制 `.doc` / `.xls`。请先用 Microsoft Office 或 LibreOffice 转换为 DOCX/XLSX；上传时服务会按扩展名和文件签名校验，损坏或加密的 Office 压缩包以及密码保护的 PDF 会被明确拒绝。
-
-环境变量：`LOCAL_DESENSITIZATION_DATA_DIR`（默认 `data/`）、`LOCAL_DESENSITIZATION_MODEL_DIR`（默认 `models/`）、`TASK_TTL_HOURS`（默认 24）、`CLEANUP_INTERVAL_SECONDS`（默认 300）、`MAX_BATCH_FILES`（默认 20）、`MAX_BATCH_BYTES`（默认 524288000）、`MAX_IMAGE_PIXELS`（默认 40000000）、`MAX_PDF_OCR_PAGES`（默认 200）和 `MAX_PDF_OCR_PIXELS`（默认 12000000）。单文件上传上限为 50 MB。
-
-## 功能入口
-
-- 文本：分析实体、人工复核、策略化脱敏和任务内恢复。
-- 图片：OCR 框识别、Canvas 手工框选、模糊/像素化/纯色/文字遮盖。
-- 文档：TXT、MD、DOCX、XLSX/XLSM、PDF 的文本/页面区域复核与标准化输出。
-- 规则：添加词条或正则规则，按实体类型参与分析。
-- 策略：按实体类型配置文本动作和图片动作，并持久化到本地 SQLite。
-- 批量：上传多个文件，统一复核实体/页面区域后生成 ZIP 和脱敏报告。
-- 任务：查看本地任务、下载脱敏文件/报告/恢复文件并删除任务。
-
-所有用户文件都保存在项目 `data/`，默认任务保留 24 小时后自动清理（可通过 `TASK_TTL_HOURS` 调整）。默认服务地址为 `http://127.0.0.1:8765`，不会上传到远程服务。`data/`、`models/` 和运行时临时目录已加入 `.gitignore`。
-
-## 接口与测试
-
-主要接口为 `/api/text/*`、`/api/files/analyze`、`/api/files/mask`、`/api/image/*`、`/api/document/*`、`/api/batches/*`、`/api/policies`、`/api/rules` 和 `/api/tasks`；完整请求模型可在 `/docs` 查看。
-
-运行回归测试（会生成真实 DOCX、XLSX、XLSM、PDF 和图片到 pytest 临时目录）：
-
-```powershell
-uv run pytest -q
-uv run python -m compileall -q app
-```
-
-本机已下载 RaNER 与 PaddleOCR 模型后，可执行真实模型验收：
-
-```powershell
-$env:RUN_REAL_MODELS='1'
-uv run pytest -q tests/test_real_models.py
-```
+实现与本机验收记录见 [桌面版状态](docs/migration/desktop-status.md)。发布前仍需全新 Windows 虚拟机、LibreOffice、原生 WebView2 自动化和长期性能/格式模糊测试。旧 Python/FastAPI 与 Nuitka 的源文件已移除；本项目 `.venv` 和旧缓存目录的递归删除被当前执行环境拦截，仍待清理。已有 Rust 黄金样本继续用于识别回归。

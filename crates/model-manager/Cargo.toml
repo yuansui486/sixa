@@ -1,0 +1,19 @@
+[package]
+name = "model-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+domain.workspace = true
+recognition.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+fs2 = "0.4"
+[dev-dependencies]
+uuid.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

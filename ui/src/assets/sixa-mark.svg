@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">私匣 Sixa</title>
+  <desc id="desc">一份经过隐私处理的文件收进匣盒</desc>
+  <rect x="32" y="32" width="448" height="448" rx="96" fill="#126c60"/>
+  <path d="m82 252 54-70h240l54 70-51 52H133l-51-52Z" fill="#b9ddd7"/>
+  <path d="M180 76h128l64 64v214H180V76Z" fill="#ffffff"/>
+  <path d="M308 76v48c0 8.8 7.2 16 16 16h48l-64-64Z" fill="#b9ddd7"/>
+  <rect x="216" y="178" width="120" height="20" rx="10" fill="#126c60"/>
+  <rect x="216" y="230" width="120" height="20" rx="10" fill="#126c60"/>
+  <rect x="252" y="219" width="58" height="42" rx="12" fill="#e5ad45"/>
+  <path d="M82 270h348v118c0 27.6-22.4 50-50 50H132c-27.6 0-50-22.4-50-50V270Z" fill="#f8fbfa"/>
+  <rect x="184" y="338" width="144" height="22" rx="11" fill="#126c60"/>
+</svg>

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "私匣",
+  "version": "1.0.0",
+  "identifier": "cn.shierkeji.sixa",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [{"label":"main","title":"私匣 · 本机数据脱敏","width":1280,"height":850,"minWidth":960,"minHeight":640}],
+    "security": {"csp":"default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-src 'none'"}
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/sixa-mcp"],
+    "category": "Utility",
+    "licenseFile": "../LICENSE",
+    "resources": {"../LICENSE":"LICENSE.txt","../THIRD_PARTY_NOTICES.md":"THIRD_PARTY_NOTICES.md"},
+    "shortDescription": "私匣 · 本机离线中文数据脱敏",
+    "windows": {"nsis":{"displayLanguageSelector":false,"languages":["SimpChinese"],"installMode":"currentUser"}}
+  }
+}
