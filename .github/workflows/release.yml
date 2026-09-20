@@ -152,9 +152,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
         run: |
+          version="${RELEASE_TAG#v}"
+          windows_installer="$(find release-assets -maxdepth 1 -type f -name '*.exe' -print -quit)"
+          macos_arm64="$(find release-assets -maxdepth 1 -type f -name '*aarch64.dmg' -print -quit)"
+          macos_x64="$(find release-assets -maxdepth 1 -type f -name '*x64.dmg' -print -quit)"
+          test -n "$windows_installer" && test -n "$macos_arm64" && test -n "$macos_x64"
+          mv "$windows_installer" "release-assets/Sixa_${version}_windows_x64_setup.exe"
+          mv "$macos_arm64" "release-assets/Sixa_${version}_macos_arm64.dmg"
+          mv "$macos_x64" "release-assets/Sixa_${version}_macos_x64.dmg"
           (
             cd release-assets
-            find . -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+            find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
           ) > release-assets/SHA256SUMS.txt
           cat > release-notes.md <<'EOF'
           私匣是本机数据脱敏桌面应用。本次 Release 提供：
@@ -166,6 +174,11 @@ jobs:
           安装程序当前未进行商业代码签名。macOS 首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.22.0 universal2 运行库。
           EOF
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
+              case "$asset" in
+                *.exe|*.dmg|SHA256SUMS.txt) gh release delete-asset "$RELEASE_TAG" "$asset" --yes ;;
+              esac
+            done
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
           else
             gh release create "$RELEASE_TAG" release-assets/* \
