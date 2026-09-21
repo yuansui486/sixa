@@ -28,11 +28,11 @@ Rust workspace 为 `domain`、`recognition`、`formats`、`storage`、`model-man
 
 ## 模型发布
 
-主下载目录：[阿里云 OSS desktop-models-v1.0.0](https://tct12-visitors.oss-cn-beijing.aliyuncs.com/sixa/models/desktop-models-v1.0.0/desktop/catalog.json)
+主下载目录：[阿里云 OSS desktop-models-v1.0.0](https://tct12.oss-cn-beijing.aliyuncs.com/12box/sixa/models/desktop-models-v1.0.0/desktop/catalog.json)
 
 备用版本：[ModelScope desktop-models-v1.0.0](https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/tags/desktop-models-v1.0.0)
 
-- 双源目录 SHA-256：`c38e8458651d4b2c32d780822934ea6b512c3954fa961a6eb09671903a26561b`
+- 双源目录 SHA-256：`94ee999d45dae02e38d54b509ece4788d082f6ea58e2930403f67c24f7a3f21d`
 - RaNER 包：`4386188a3453e20f703feb009f3c731a1adea654b87747bfd292cca05ce3e6b1`
 - PP-OCRv4 mobile 包：`b260c430ed85d3ebe0bbf37705cdbcf33a11be41be691ded77df470b4e83a832`
 - PP-OCRv4 accurate 包：`6e9ded592fa160877168b5d1c51e802210473f645d2800c5c150548f922cde07`

@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的现有标签，例如 v1.0.3"
+        description: "要发布的现有标签，例如 v1.0.4"
         required: true
-        default: "v1.0.3"
+        default: "v1.0.4"
       publish:
         description: "构建成功后发布 GitHub Release"
         required: true

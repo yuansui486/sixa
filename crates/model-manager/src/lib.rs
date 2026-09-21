@@ -16,22 +16,19 @@ const MAX_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DISK_RESERVE_BYTES: u64 = 128 * 1024 * 1024;
 const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
-const TRUSTED_HOSTS: &[&str] = &[
-    "tct12-visitors.oss-cn-beijing.aliyuncs.com",
-    "www.modelscope.cn",
-];
+const TRUSTED_HOSTS: &[&str] = &["tct12.oss-cn-beijing.aliyuncs.com", "www.modelscope.cn"];
 pub const CATALOG_URLS: &[(&str, &str)] = &[(
-    "https://tct12-visitors.oss-cn-beijing.aliyuncs.com/sixa/models/desktop-models-v1.0.0/desktop/catalog.json",
+    "https://tct12.oss-cn-beijing.aliyuncs.com/12box/sixa/models/desktop-models-v1.0.0/desktop/catalog.json",
     "阿里云 OSS",
 )];
-pub const CATALOG_SHA256: &str = "c38e8458651d4b2c32d780822934ea6b512c3954fa961a6eb09671903a26561b";
+pub const CATALOG_SHA256: &str = "94ee999d45dae02e38d54b509ece4788d082f6ea58e2930403f67c24f7a3f21d";
 const TRUSTED_CATALOG: &str = r#"{
   "schema": 2,
   "revision": "desktop-models-v1.0.0",
   "packages": [
-    {"id":"raner-v1","version":"raner-v1.0.0","profile":"text","sources":[{"url":"https://tct12-visitors.oss-cn-beijing.aliyuncs.com/sixa/models/desktop-models-v1.0.0/desktop/raner-v1.zip","label":"阿里云 OSS"},{"url":"https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/resolve/desktop-models-v1.0.0/desktop/raner-v1.zip","label":"ModelScope 备用源"}],"size":383443560,"unpacked_size":423875153,"sha256":"4386188a3453e20f703feb009f3c731a1adea654b87747bfd292cca05ce3e6b1"},
-    {"id":"ppocrv4-mobile-v1","version":"ppocrv4-mobile-v1.0.0","profile":"mobile","sources":[{"url":"https://tct12-visitors.oss-cn-beijing.aliyuncs.com/sixa/models/desktop-models-v1.0.0/desktop/ppocrv4-mobile-v1.zip","label":"阿里云 OSS"},{"url":"https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/resolve/desktop-models-v1.0.0/desktop/ppocrv4-mobile-v1.zip","label":"ModelScope 备用源"}],"size":20617575,"unpacked_size":32590797,"sha256":"b260c430ed85d3ebe0bbf37705cdbcf33a11be41be691ded77df470b4e83a832"},
-    {"id":"ppocrv4-accurate-v1","version":"ppocrv4-accurate-v1.0.0","profile":"accurate","sources":[{"url":"https://tct12-visitors.oss-cn-beijing.aliyuncs.com/sixa/models/desktop-models-v1.0.0/desktop/ppocrv4-accurate-v1.zip","label":"阿里云 OSS"},{"url":"https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/resolve/desktop-models-v1.0.0/desktop/ppocrv4-accurate-v1.zip","label":"ModelScope 备用源"}],"size":185636512,"unpacked_size":220901772,"sha256":"6e9ded592fa160877168b5d1c51e802210473f645d2800c5c150548f922cde07"}
+    {"id":"raner-v1","version":"raner-v1.0.0","profile":"text","sources":[{"url":"https://tct12.oss-cn-beijing.aliyuncs.com/12box/sixa/models/desktop-models-v1.0.0/desktop/raner-v1.zip","label":"阿里云 OSS"},{"url":"https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/resolve/desktop-models-v1.0.0/desktop/raner-v1.zip","label":"ModelScope 备用源"}],"size":383443560,"unpacked_size":423875153,"sha256":"4386188a3453e20f703feb009f3c731a1adea654b87747bfd292cca05ce3e6b1"},
+    {"id":"ppocrv4-mobile-v1","version":"ppocrv4-mobile-v1.0.0","profile":"mobile","sources":[{"url":"https://tct12.oss-cn-beijing.aliyuncs.com/12box/sixa/models/desktop-models-v1.0.0/desktop/ppocrv4-mobile-v1.zip","label":"阿里云 OSS"},{"url":"https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/resolve/desktop-models-v1.0.0/desktop/ppocrv4-mobile-v1.zip","label":"ModelScope 备用源"}],"size":20617575,"unpacked_size":32590797,"sha256":"b260c430ed85d3ebe0bbf37705cdbcf33a11be41be691ded77df470b4e83a832"},
+    {"id":"ppocrv4-accurate-v1","version":"ppocrv4-accurate-v1.0.0","profile":"accurate","sources":[{"url":"https://tct12.oss-cn-beijing.aliyuncs.com/12box/sixa/models/desktop-models-v1.0.0/desktop/ppocrv4-accurate-v1.zip","label":"阿里云 OSS"},{"url":"https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/resolve/desktop-models-v1.0.0/desktop/ppocrv4-accurate-v1.zip","label":"ModelScope 备用源"}],"size":185636512,"unpacked_size":220901772,"sha256":"6e9ded592fa160877168b5d1c51e802210473f645d2800c5c150548f922cde07"}
   ]
 }"#;
 

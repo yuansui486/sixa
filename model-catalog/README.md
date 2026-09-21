@@ -1,28 +1,30 @@
 # 私匣模型发布目录
 
-公开下载对象统一放在 Bucket `tct12-visitors` 的以下前缀：
+公开下载对象统一放在 Bucket `tct12` 的以下前缀：
 
 ```text
-sixa/models/
-└── desktop-models-v1.0.0/
-    └── desktop/
-        ├── catalog.json
-        ├── raner-v1.zip
-        ├── ppocrv4-mobile-v1.zip
-        └── ppocrv4-accurate-v1.zip
+12box/
+└── sixa/
+    └── models/
+        └── desktop-models-v1.0.0/
+            └── desktop/
+                ├── catalog.json
+                ├── raner-v1.zip
+                ├── ppocrv4-mobile-v1.zip
+                └── ppocrv4-accurate-v1.zip
 ```
 
 公网基础地址：
 
 ```text
-https://tct12-visitors.oss-cn-beijing.aliyuncs.com/sixa/models/desktop-models-v1.0.0/desktop/
+https://tct12.oss-cn-beijing.aliyuncs.com/12box/sixa/models/desktop-models-v1.0.0/desktop/
 ```
 
 文件清单：
 
 | 文件 | 用途 | 字节数 | SHA-256 |
 | --- | --- | ---: | --- |
-| `catalog.json` | 应用固定的双源下载目录 | 1,654 | `c38e8458651d4b2c32d780822934ea6b512c3954fa961a6eb09671903a26561b` |
+| `catalog.json` | 应用固定的双源下载目录 | 1,646 | `94ee999d45dae02e38d54b509ece4788d082f6ea58e2930403f67c24f7a3f21d` |
 | `raner-v1.zip` | 中文实体识别 RaNER | 383,443,560 | `4386188a3453e20f703feb009f3c731a1adea654b87747bfd292cca05ce3e6b1` |
 | `ppocrv4-mobile-v1.zip` | PP-OCRv4 轻量 OCR | 20,617,575 | `b260c430ed85d3ebe0bbf37705cdbcf33a11be41be691ded77df470b4e83a832` |
 | `ppocrv4-accurate-v1.zip` | PP-OCRv4 高精度 OCR | 185,636,512 | `6e9ded592fa160877168b5d1c51e802210473f645d2800c5c150548f922cde07` |
