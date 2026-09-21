@@ -1,0 +1,52 @@
+name: 诊断 macOS 安装包
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要诊断的 Release 标签"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: macOS Apple Silicon 安装包诊断
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - name: 下载 Release 安装包
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: gh release download "$RELEASE_TAG" --pattern 'Sixa_*_macos_arm64.dmg'
+
+      - name: 验证 DMG 和应用签名
+        shell: bash
+        run: |
+          set -o pipefail
+          dmg="$(find . -maxdepth 1 -type f -name 'Sixa_*_macos_arm64.dmg' -print -quit)"
+          test -n "$dmg"
+          shasum -a 256 "$dmg"
+          hdiutil verify "$dmg"
+          mkdir "$RUNNER_TEMP/sixa-volume"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$RUNNER_TEMP/sixa-volume"
+          trap 'hdiutil detach "$RUNNER_TEMP/sixa-volume"' EXIT
+          app="$(find "$RUNNER_TEMP/sixa-volume" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app"
+          codesign --display --verbose=4 "$app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+          main_executable="$(find "$app/Contents/MacOS" -maxdepth 1 -type f -print -quit)"
+          file "$main_executable"
+          file "$app/Contents/Resources/libonnxruntime.dylib"
+          codesign --display --verbose=4 "$app/Contents/Resources/libonnxruntime.dylib"
+          if spctl --assess --type execute --verbose=4 "$app"; then
+            echo "Gatekeeper assessment: accepted"
+          else
+            status=$?
+            echo "Gatekeeper assessment: rejected (exit $status)"
+          fi
