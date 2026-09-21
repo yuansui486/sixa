@@ -567,6 +567,14 @@ async fn reload_models(
     full_verify: bool,
     requested_limit: usize,
 ) -> Result<RuntimeModelStatus> {
+    let _ = app.emit(
+        "model-progress",
+        serde_json::json!({
+            "stage": "loading",
+            "percent": 100.0,
+            "message": "正在将模型加载到本机内存"
+        }),
+    );
     let engines = state.engines.clone();
     let status = state.model.clone();
     tauri::async_runtime::spawn_blocking(move || {

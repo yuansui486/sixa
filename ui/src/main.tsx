@@ -79,6 +79,44 @@ const client = new QueryClient({
     queries: { retry: false, refetchOnWindowFocus: false, gcTime: 0 },
   },
 });
+type ModelProgressPayload = Partial<ModelStatus> & {
+  id?: string;
+  stage?: string;
+  current?: number;
+  total?: number;
+  percent?: number;
+  bytes_per_second?: number;
+  eta_seconds?: number | null;
+  message?: string;
+};
+
+function formatRemaining(seconds?: number | null): string {
+  if (!seconds || seconds <= 0) return "";
+  if (seconds < 60) return `约 ${Math.ceil(seconds)} 秒`;
+  if (seconds < 3600) return `约 ${Math.ceil(seconds / 60)} 分钟`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.ceil((seconds % 3600) / 60);
+  return `约 ${hours} 小时${minutes ? ` ${minutes} 分钟` : ""}`;
+}
+
+function modelProgressDetails(progress: ModelProgressPayload): string {
+  return [
+    progress.total
+      ? `${formatBytes(progress.current)} / ${formatBytes(progress.total)}`
+      : "",
+    progress.bytes_per_second
+      ? `${formatBytes(progress.bytes_per_second)}/秒`
+      : "",
+    formatRemaining(progress.eta_seconds),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function canCancelModelProgress(stage?: string): boolean {
+  return ["connecting", "downloading", "retrying"].includes(stage ?? "");
+}
+
 function useAction() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -302,10 +340,10 @@ function App({
   const autoCollapsedTask = useRef<string | null>(null);
   const [preparing, setPreparing] = useState(true);
   const [prepareError, setPrepareError] = useState("");
-  const [setupProgress, setSetupProgress] = useState<{
-    percent?: number;
-    message: string;
-  } | null>(null);
+  const [setupProgress, setSetupProgress] = useState<ModelProgressPayload>({
+    stage: "checking",
+    message: "正在检查已安装模型…",
+  });
   const [activity, setActivity] = useState<{
     id?: string;
     stage: string;
@@ -362,13 +400,6 @@ function App({
         }, 2500);
       }
     };
-    call("ensure_default_models")
-      .then((m) => {
-        client.setQueryData(["model"], m);
-        setPrepareError("");
-      })
-      .catch((error) => setPrepareError(message(error)))
-      .finally(() => active && setPreparing(false));
     const subscriptions = [
       listen<{
         id?: string;
@@ -387,18 +418,31 @@ function App({
       listen<TaskMeta>("task-updated", () => {
         client.invalidateQueries({ queryKey: ["tasks"] });
       }),
-      listen<
-        ModelStatus & { percent?: number; message?: string; stage?: string }
-      >("model-progress", ({ payload }) => {
+      listen<ModelProgressPayload>("model-progress", ({ payload }) => {
         if (payload && typeof payload.ready === "boolean")
           client.setQueryData(["model"], payload);
         if (payload.message || payload.stage)
           setSetupProgress({
+            id: payload.id,
+            stage: payload.stage,
+            current: payload.current,
+            total: payload.total,
             percent: payload.percent,
+            bytes_per_second: payload.bytes_per_second,
+            eta_seconds: payload.eta_seconds,
             message: payload.message ?? modelStageLabel(payload.stage ?? ""),
           });
       }),
     ];
+    void Promise.allSettled(subscriptions)
+      .then(() => (active ? call("ensure_default_models") : null))
+      .then((m) => {
+        if (!active || !m) return;
+        client.setQueryData(["model"], m);
+        setPrepareError("");
+      })
+      .catch((error) => active && setPrepareError(message(error)))
+      .finally(() => active && setPreparing(false));
     return () => {
       active = false;
       if (activityTimer.current !== null)
@@ -552,11 +596,16 @@ function App({
             <p>
               首次使用需要下载并校验基础模型。完成后即可开始处理，文件内容不会上传。
             </p>
-            {setupProgress?.percent !== undefined && (
-              <progress max="100" value={setupProgress.percent} />
-            )}
+            <progress max="100" value={setupProgress?.percent} />
             <strong>{setupProgress?.message ?? "正在检查已安装模型…"}</strong>
-            <small>下载中断后可以继续；已安装模型在离线时仍可使用。</small>
+            {modelProgressDetails(setupProgress ?? {}) && (
+              <span className="setup-progress-meta">
+                {modelProgressDetails(setupProgress ?? {})}
+              </span>
+            )}
+            <small>
+              下载来源：ModelScope 中国站 · 下载中断后可以继续 · 已安装模型可离线使用
+            </small>
           </section>
         ) : (
           <Routes>
@@ -579,6 +628,8 @@ function modelStageLabel(stage: string): string {
     (
       {
         verifying: "正在校验模型",
+        connecting: "正在连接 ModelScope 中国站",
+        retrying: "正在重新下载模型",
         downloading: "正在下载模型",
         installing: "正在安装模型",
         loading: "正在加载模型",
@@ -2410,15 +2461,10 @@ function Models() {
   const queryClient = useQueryClient();
   const action = useAction();
   const [progress, setProgress] = useState<
-    Record<string, { percent: number; message: string }>
+    Record<string, ModelProgressPayload>
   >({});
   useEffect(() => {
-    const unlisten = listen<{
-      id?: string;
-      percent?: number;
-      message?: string;
-      stage?: string;
-    }>("model-progress", ({ payload }) => {
+    const unlisten = listen<ModelProgressPayload>("model-progress", ({ payload }) => {
       if (!payload.id) return;
       if (["failed", "cancelled"].includes(payload.stage ?? "")) {
         setProgress((current) => {
@@ -2431,7 +2477,13 @@ function Models() {
       setProgress((current) => ({
         ...current,
         [payload.id!]: {
+          id: payload.id,
+          stage: payload.stage,
+          current: payload.current,
+          total: payload.total,
           percent: payload.percent ?? 0,
+          bytes_per_second: payload.bytes_per_second,
+          eta_seconds: payload.eta_seconds,
           message: payload.message ?? "正在处理模型",
         },
       }));
@@ -2443,7 +2495,7 @@ function Models() {
   return (
     <>
       <Heading title="模型管理">
-        模型在本机执行。校验或加载失败时，分析不会继续。
+        模型在本机执行，通过 ModelScope 中国站下载。校验或加载失败时，分析不会继续。
       </Heading>
       <Feedback
         {...action}
@@ -2511,10 +2563,13 @@ function Models() {
             {progress[item.id] && (
               <div className="download-progress">
                 <progress max="100" value={progress[item.id].percent} />
-                <span>
-                  {progress[item.id].message} ·{" "}
-                  {progress[item.id].percent.toFixed(0)}%
-                </span>
+                <div className="download-progress-head">
+                  <span>{progress[item.id].message}</span>
+                  <strong>{(progress[item.id].percent ?? 0).toFixed(0)}%</strong>
+                </div>
+                {modelProgressDetails(progress[item.id]) && (
+                  <small>{modelProgressDetails(progress[item.id])}</small>
+                )}
               </div>
             )}
             <div className="toolbar">
@@ -2552,7 +2607,8 @@ function Models() {
                     ? "按需下载"
                     : "下载并安装"}
               </button>
-              {progress[item.id] && (
+              {progress[item.id] &&
+                canCancelModelProgress(progress[item.id].stage) && (
                 <button
                   className="secondary"
                   onClick={() =>
@@ -2561,7 +2617,7 @@ function Models() {
                 >
                   取消下载
                 </button>
-              )}
+                )}
             </div>
           </section>
         ))}

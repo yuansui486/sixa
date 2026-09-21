@@ -307,6 +307,12 @@ main {
   font-size: 14px;
   color: #40566e;
 }
+.setup-progress-meta {
+  margin-top: 6px;
+  color: #637186;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
 .setup-page small {
   margin-top: 12px;
 }
@@ -933,7 +939,24 @@ dd {
 }
 .download-progress progress {
   width: 100%;
+  height: 9px;
   accent-color: #19796d;
+}
+.download-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+}
+.download-progress-head strong,
+.download-progress small {
+  font-variant-numeric: tabular-nums;
+}
+.download-progress-head strong {
+  color: #40566e;
+}
+.download-progress small {
+  color: #758297;
 }
 .setting-line {
   max-width: 360px;
@@ -1413,6 +1436,33 @@ dd {
   .command-actions button {
     padding-left: 9px;
     padding-right: 9px;
+  }
+}
+@media (max-height: 720px) {
+  .app > aside {
+    padding: 16px 12px 12px;
+  }
+  .brand {
+    margin-bottom: 14px;
+  }
+  nav {
+    gap: 2px;
+  }
+  nav a {
+    padding: 8px 11px;
+  }
+  .local {
+    padding: 8px 6px;
+  }
+  .account-summary {
+    min-height: 46px;
+    margin-bottom: 3px;
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+  .sidebar-toggle {
+    min-height: 36px;
+    margin-top: 2px;
   }
 }
 @media (prefers-contrast: more) {

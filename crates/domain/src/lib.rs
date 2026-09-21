@@ -279,6 +279,10 @@ pub struct ProgressEvent {
     pub current: u64,
     pub total: u64,
     pub percent: f32,
+    #[serde(default)]
+    pub bytes_per_second: u64,
+    #[serde(default)]
+    pub eta_seconds: Option<u64>,
     pub message: String,
 }
 

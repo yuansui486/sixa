@@ -8,12 +8,14 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 use tokio::io::AsyncWriteExt;
 
 const MAX_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DISK_RESERVE_BYTES: u64 = 128 * 1024 * 1024;
 const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 const TRUSTED_HOST: &str = "www.modelscope.cn";
 pub const CATALOG_URL: &str = "https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/resolve/desktop-models-v1.0.0/desktop/catalog.json";
 pub const CATALOG_SHA256: &str = "1b91ec357c0908192a94a9c21f145fd1fb48f686c442ca7d2db3223e611819a0";
@@ -150,7 +152,9 @@ pub async fn download_and_install(
                 current: 0,
                 total: package.size,
                 percent: 0.0,
-                message: format!("{} 校验失败，正在重新下载", package.id),
+                bytes_per_second: 0,
+                eta_seconds: None,
+                message: format!("{} 校验失败，正在重新下载", package_label(package)),
             });
         }
         let mut old_state = read_state(&state_path);
@@ -175,6 +179,26 @@ pub async fn download_and_install(
         ensure_disk_space(root, package, offset)?;
         let mut downloaded = offset;
         if offset < package.size {
+            progress(ProgressEvent {
+                id: package.id.clone(),
+                stage: "connecting".into(),
+                current: offset,
+                total: package.size,
+                percent: offset as f32 * 100.0 / package.size as f32,
+                bytes_per_second: 0,
+                eta_seconds: None,
+                message: if offset > 0 {
+                    format!(
+                        "正在连接 ModelScope 中国站，准备继续下载 {}",
+                        package_label(package)
+                    )
+                } else {
+                    format!(
+                        "正在连接 ModelScope 中国站，准备下载 {}",
+                        package_label(package)
+                    )
+                },
+            });
             let mut request = client.get(&package.url);
             if offset > 0 {
                 request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
@@ -221,6 +245,9 @@ pub async fn download_and_install(
                 .truncate(offset == 0)
                 .open(&part)
                 .await?;
+            let session_offset = downloaded;
+            let session_started = Instant::now();
+            let mut last_progress = Instant::now() - PROGRESS_INTERVAL;
             loop {
                 let chunk = tokio::time::timeout(CHUNK_TIMEOUT, response.chunk())
                     .await
@@ -237,20 +264,47 @@ pub async fn download_and_install(
                     return Err(download_error("服务端返回的数据超过清单大小"));
                 }
                 output.write_all(&chunk).await?;
-                progress(ProgressEvent {
-                    id: package.id.clone(),
-                    stage: "downloading".into(),
-                    current: downloaded,
-                    total: package.size,
-                    percent: downloaded as f32 * 100.0 / package.size as f32,
-                    message: format!("正在下载 {}", package.id),
-                });
+                if last_progress.elapsed() >= PROGRESS_INTERVAL || downloaded == package.size {
+                    let elapsed = session_started.elapsed().as_secs_f64();
+                    let bytes_per_second = if elapsed > 0.0 {
+                        ((downloaded - session_offset) as f64 / elapsed).round() as u64
+                    } else {
+                        0
+                    };
+                    let eta_seconds = (bytes_per_second > 0).then(|| {
+                        package
+                            .size
+                            .saturating_sub(downloaded)
+                            .div_ceil(bytes_per_second)
+                    });
+                    progress(ProgressEvent {
+                        id: package.id.clone(),
+                        stage: "downloading".into(),
+                        current: downloaded,
+                        total: package.size,
+                        percent: downloaded as f32 * 100.0 / package.size as f32,
+                        bytes_per_second,
+                        eta_seconds,
+                        message: format!("正在下载 {}", package_label(package)),
+                    });
+                    last_progress = Instant::now();
+                }
             }
             output.flush().await?;
         }
         if cancellation.is_cancelled() {
             return Err(Error::State("模型下载已取消".into()));
         }
+        progress(ProgressEvent {
+            id: package.id.clone(),
+            stage: "verifying".into(),
+            current: downloaded,
+            total: package.size,
+            percent: 100.0,
+            bytes_per_second: 0,
+            eta_seconds: None,
+            message: format!("正在校验 {}", package_label(package)),
+        });
         verified = downloaded == package.size
             && file_sha256(&part)? == package.sha256.to_ascii_lowercase();
         if verified {
@@ -265,6 +319,16 @@ pub async fn download_and_install(
         ));
     }
     let destination = root.join("models").join(&package.id);
+    progress(ProgressEvent {
+        id: package.id.clone(),
+        stage: "installing".into(),
+        current: package.size,
+        total: package.size,
+        percent: 100.0,
+        bytes_per_second: 0,
+        eta_seconds: None,
+        message: format!("正在安装 {}", package_label(package)),
+    });
     install_archive(&part, &destination, package.unpacked_size)?;
     let _ = std::fs::remove_file(part);
     let _ = std::fs::remove_file(state_path);
@@ -274,9 +338,20 @@ pub async fn download_and_install(
         current: package.size,
         total: package.size,
         percent: 100.0,
-        message: format!("{} 已安装", package.id),
+        bytes_per_second: 0,
+        eta_seconds: Some(0),
+        message: format!("{} 已安装", package_label(package)),
     });
     Ok(destination)
+}
+
+fn package_label(package: &ModelPackage) -> &'static str {
+    match package.profile.as_str() {
+        "text" => "中文实体识别模型",
+        "mobile" => "轻量 OCR 模型",
+        "accurate" => "高精度 OCR 模型",
+        _ => "模型",
+    }
 }
 
 fn ensure_disk_space(root: &Path, package: &ModelPackage, downloaded: u64) -> Result<()> {

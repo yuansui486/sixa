@@ -10,6 +10,7 @@ declare global {
       resolveDocumentPreview?: () => void;
       resolveUpsert?: () => void;
       resolveRemove?: () => void;
+      emit: (event: string, payload: unknown) => void;
     };
     __delayDocumentPreview__?: boolean;
     __delayRegionMutations__?: boolean;
@@ -94,11 +95,19 @@ test.beforeEach(async ({ page }) => {
       text: null,
       warnings: [],
     };
+    const eventCallbacks = new Map<number, (event: unknown) => void>();
+    const eventListeners = new Map<string, Set<number>>();
+    let nextCallbackId = 1;
     const state = (window.__mock__ = {
       calls: {},
       task,
       lastUpsert: null,
       lastRemove: null,
+      emit: (event: string, payload: unknown) => {
+        for (const id of eventListeners.get(event) ?? []) {
+          eventCallbacks.get(id)?.({ event, id, payload });
+        }
+      },
     });
     const count = (command: string) => {
       state.calls[command] = (state.calls[command] ?? 0) + 1;
@@ -283,8 +292,16 @@ test.beforeEach(async ({ page }) => {
             ? "C:\\test\\exports"
             : "C:\\test\\测试简历.pdf";
         }
-        if (command === "plugin:event|listen") return 1;
-        if (command === "plugin:event|unlisten") return undefined;
+        if (command === "plugin:event|listen") {
+          const listeners = eventListeners.get(args.event) ?? new Set<number>();
+          listeners.add(args.handler);
+          eventListeners.set(args.event, listeners);
+          return args.handler;
+        }
+        if (command === "plugin:event|unlisten") {
+          eventListeners.get(args.event)?.delete(args.eventId);
+          return undefined;
+        }
         const handler = handlers[command];
         if (!handler) throw Error("未模拟命令 " + command);
         return structuredClone(await handler(args));
@@ -293,6 +310,17 @@ test.beforeEach(async ({ page }) => {
         currentWindow: { label: "main" },
         currentWebview: { label: "main" },
       },
+      transformCallback: (callback: (event: unknown) => void, once = false) => {
+        const id = nextCallbackId++;
+        eventCallbacks.set(id, (event) => {
+          callback(event);
+          if (once) eventCallbacks.delete(id);
+        });
+        return id;
+      },
+    } as any;
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener: () => undefined,
     } as any;
   }, PDF_PAGE);
 });
@@ -567,4 +595,28 @@ test("重建模型需确认，取消时不删除模型", async ({ page }) => {
   await expect
     .poll(() => page.evaluate(() => window.__rebuild_count__ ?? 0))
     .toBe(1);
+});
+
+test("模型下载展示进度、速度和剩余时间", async ({ page }) => {
+  await page.goto("/#/models");
+  await expect(page.getByRole("heading", { name: "模型管理" })).toBeVisible();
+  await page.evaluate(() =>
+    window.__mock__.emit("model-progress", {
+      id: "raner-v1",
+      stage: "downloading",
+      current: 50 * 1024 * 1024,
+      total: 100 * 1024 * 1024,
+      percent: 50,
+      bytes_per_second: 1024 * 1024,
+      eta_seconds: 50,
+      message: "正在下载 中文实体识别模型",
+    }),
+  );
+  const progress = page.locator(".download-progress");
+  await expect(progress).toContainText("正在下载 中文实体识别模型");
+  await expect(progress).toContainText("50%");
+  await expect(progress).toContainText("50 MB / 100 MB");
+  await expect(progress).toContainText("1.0 MB/秒");
+  await expect(progress).toContainText("约 50 秒");
+  await expect(page.getByRole("button", { name: "取消下载" })).toBeVisible();
 });
