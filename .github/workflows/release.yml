@@ -102,21 +102,21 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          archive="$RUNNER_TEMP/onnxruntime-osx-universal2-1.22.0.tgz"
+          archive="$RUNNER_TEMP/onnxruntime-osx-universal2-1.23.2.tgz"
           curl --fail --location --retry 3 \
             --output "$archive" \
-            "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-universal2-1.22.0.tgz"
-          echo "cfa6f6584d87555ed9f6e7e8a000d3947554d589efe3723b8bfa358cd263d03c  $archive" | shasum -a 256 --check
+            "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-universal2-1.23.2.tgz"
+          echo "49ae8e3a66ccb18d98ad3fe7f5906b6d7887df8a5edd40f49eb2b14e20885809  $archive" | shasum -a 256 --check
           mkdir -p src-tauri/runtime
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           cp -L \
-            "$RUNNER_TEMP/onnxruntime-osx-universal2-1.22.0/lib/libonnxruntime.dylib" \
+            "$RUNNER_TEMP/onnxruntime-osx-universal2-1.23.2/lib/libonnxruntime.dylib" \
             src-tauri/runtime/libonnxruntime.dylib
           cp \
-            "$RUNNER_TEMP/onnxruntime-osx-universal2-1.22.0/LICENSE" \
+            "$RUNNER_TEMP/onnxruntime-osx-universal2-1.23.2/LICENSE" \
             src-tauri/runtime/ONNXRuntime-LICENSE.txt
           cp \
-            "$RUNNER_TEMP/onnxruntime-osx-universal2-1.22.0/ThirdPartyNotices.txt" \
+            "$RUNNER_TEMP/onnxruntime-osx-universal2-1.23.2/ThirdPartyNotices.txt" \
             src-tauri/runtime/ONNXRuntime-ThirdPartyNotices.txt
           codesign --force --sign - --timestamp=none src-tauri/runtime/libonnxruntime.dylib
           codesign --verify --strict --verbose=4 src-tauri/runtime/libonnxruntime.dylib
@@ -215,7 +215,7 @@ jobs:
 
           模型优先通过阿里云 OSS 北京公网地址下载，失败时自动切换到 ModelScope 备用源。两个来源共享断点，下载界面会显示当前来源、切换状态、百分比、已下载大小、实时速度和预计剩余时间。
 
-          macOS 应用已进行完整性签名，但尚未使用 Apple Developer ID 签名和公证。首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.22.0 universal2 运行库。
+          macOS 应用已进行完整性签名，但尚未使用 Apple Developer ID 签名和公证。首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.23.2 universal2 运行库。
           EOF
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
