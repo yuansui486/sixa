@@ -9,6 +9,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let catalog = fetch_catalog(&client)
         .await
         .map_err(|error| format!("fetch catalog: {error}"))?;
+    for candidate in &catalog.packages {
+        let source = candidate
+            .sources
+            .first()
+            .ok_or_else(|| format!("{} has no download source", candidate.id))?;
+        let end = candidate.size.saturating_sub(1).min(1024 * 1024 - 1);
+        let response = client
+            .get(&source.url)
+            .header(reqwest::header::RANGE, format!("bytes=0-{end}"))
+            .send()
+            .await
+            .map_err(|error| format!("range request {}: {error}", candidate.id))?;
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(format!(
+                "{} range request returned HTTP {}",
+                candidate.id,
+                response.status()
+            )
+            .into());
+        }
+        let expected_range = format!("bytes 0-{end}/{}", candidate.size);
+        let actual_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if actual_range != expected_range {
+            return Err(format!(
+                "{} returned invalid Content-Range: {actual_range}",
+                candidate.id
+            )
+            .into());
+        }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| format!("read range {}: {error}", candidate.id))?;
+        if body.len() as u64 != end + 1 {
+            return Err(format!("{} returned an incomplete range", candidate.id).into());
+        }
+        println!(
+            "range ok: {} via {} ({} bytes)",
+            candidate.id,
+            source.label,
+            body.len()
+        );
+    }
     let package = catalog
         .packages
         .iter()

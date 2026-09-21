@@ -90,6 +90,9 @@ jobs:
       - name: 安装前端依赖
         run: npm ci --prefix ui
 
+      - name: 验证正式模型下载、续传和自动安装
+        run: cargo run --locked -p model-manager --example remote_acceptance
+
       - name: 构建 Windows MCP sidecar
         if: runner.os == 'Windows'
         shell: pwsh
