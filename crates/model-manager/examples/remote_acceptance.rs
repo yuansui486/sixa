@@ -129,12 +129,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     recognition::models::verify_with_required(&installed, recognition::models::OCR_MODEL_FILES)
         .map_err(|error| format!("verify installed model: {error}"))?;
+    eprintln!("inference checkpoint: package verified");
     install_test_runtime(&installed)?;
+    eprintln!("inference checkpoint: runtime installed");
     let mut ocr = PpOcr::load(&installed).map_err(|error| format!("load OCR model: {error}"))?;
+    eprintln!("inference checkpoint: sessions loaded");
     let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
     let lines = ocr
         .recognize(&image, &OcrRun::new()?)
         .map_err(|error| format!("run OCR inference: {error}"))?;
+    eprintln!("inference checkpoint: inference completed");
     println!(
         "{}",
         serde_json::json!({
