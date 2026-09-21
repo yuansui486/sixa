@@ -118,6 +118,8 @@ jobs:
           cp \
             "$RUNNER_TEMP/onnxruntime-osx-universal2-1.22.0/ThirdPartyNotices.txt" \
             src-tauri/runtime/ONNXRuntime-ThirdPartyNotices.txt
+          codesign --force --sign - --timestamp=none src-tauri/runtime/libonnxruntime.dylib
+          codesign --verify --strict --verbose=4 src-tauri/runtime/libonnxruntime.dylib
 
       - name: 构建安装程序
         run: npx --prefix ui tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
