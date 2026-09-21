@@ -378,6 +378,23 @@ function App({
   }, [activeTaskId, inActiveWorkbench]);
   useEffect(() => {
     let active = true;
+    let modelLoadTimer: number | null = null;
+    const clearModelLoadTimer = () => {
+      if (modelLoadTimer !== null) {
+        window.clearTimeout(modelLoadTimer);
+        modelLoadTimer = null;
+      }
+    };
+    const armModelLoadTimer = () => {
+      clearModelLoadTimer();
+      modelLoadTimer = window.setTimeout(() => {
+        if (!active) return;
+        setPrepareError(
+          "模型加载超过 90 秒，请前往模型管理重新加载；仍失败时可重建对应模型。",
+        );
+        setPreparing(false);
+      }, 90_000);
+    };
     const updateActivity = (
       payload: {
         id?: string;
@@ -430,6 +447,8 @@ function App({
         client.invalidateQueries({ queryKey: ["tasks"] });
       }),
       listen<ModelProgressPayload>("model-progress", ({ payload }) => {
+        if (payload.stage === "loading") armModelLoadTimer();
+        else if (payload.stage) clearModelLoadTimer();
         if (payload && typeof payload.ready === "boolean")
           client.setQueryData(["model"], payload);
         if (
@@ -451,16 +470,33 @@ function App({
       }),
     ];
     void Promise.allSettled(subscriptions)
-      .then(() => (active ? call("ensure_default_models") : null))
+      .then(async () => {
+        if (!active) return null;
+        const current = await call("model_status");
+        if (!active) return null;
+        client.setQueryData(["model"], current);
+        const installed = ["raner-v1", "ppocrv4-mobile-v1"].every((id) =>
+          (current.capabilities ?? []).some(
+            (capability) => capability.id === id && capability.installed,
+          ),
+        );
+        if (installed) setPreparing(false);
+        return call("ensure_default_models");
+      })
       .then((m) => {
         if (!active || !m) return;
+        clearModelLoadTimer();
         client.setQueryData(["model"], m);
         setPrepareError("");
       })
-      .catch((error) => active && setPrepareError(message(error)))
+      .catch((error) => {
+        clearModelLoadTimer();
+        if (active) setPrepareError(message(error));
+      })
       .finally(() => active && setPreparing(false));
     return () => {
       active = false;
+      clearModelLoadTimer();
       if (activityTimer.current !== null)
         window.clearTimeout(activityTimer.current);
       subscriptions.forEach(

@@ -20,7 +20,7 @@ fn install_test_runtime(_model_dir: &Path) -> Result<(), Box<dyn std::error::Err
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder()
         .https_only(true)
-        .user_agent("Sixa/1.0.7")
+        .user_agent("Sixa/1.0.8")
         .build()?;
     let catalog = fetch_catalog(&client)
         .await

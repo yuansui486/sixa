@@ -202,6 +202,17 @@ impl PpOcr {
         })
     }
 
+    /// Runs every OCR graph once so a model is only reported ready after the
+    /// runtime, model inputs, and model outputs have all been exercised.
+    pub fn warm_up(&mut self) -> Result<()> {
+        let image = RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
+        let run = OcrRun::new()?;
+        self.detect(&image, &run)?;
+        self.classify_batch(std::slice::from_ref(&image), &run)?;
+        self.recognize_batch(std::slice::from_ref(&image), &run)?;
+        Ok(())
+    }
+
     fn detect(&mut self, image: &RgbaImage, run: &OcrRun) -> Result<Vec<Vec<Point>>> {
         let (input, width, height) = det_input(image, self.config.det_limit_side);
         let options = run.begin()?;

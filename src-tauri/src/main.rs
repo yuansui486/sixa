@@ -510,9 +510,13 @@ async fn save_settings(
         &state,
         app,
         HashMap::new(),
-        true,
-        false,
-        concurrency as usize,
+        ModelLoadPlan {
+            reuse_loaded: true,
+            full_verify: false,
+            worker_limit: concurrency as usize,
+            mobile_ocr: true,
+            accurate_ocr: false,
+        },
     )
     .await?;
     if status.ready {
@@ -559,13 +563,20 @@ fn verify_installed(
     }
 }
 
+#[derive(Clone, Copy)]
+struct ModelLoadPlan {
+    reuse_loaded: bool,
+    full_verify: bool,
+    worker_limit: usize,
+    mobile_ocr: bool,
+    accurate_ocr: bool,
+}
+
 async fn reload_models(
     state: &AppState,
     app: tauri::AppHandle,
     verified: HashMap<String, recognition::models::VerifiedModel>,
-    reuse_loaded: bool,
-    full_verify: bool,
-    requested_limit: usize,
+    plan: ModelLoadPlan,
 ) -> Result<RuntimeModelStatus> {
     let _ = app.emit(
         "model-progress",
@@ -592,14 +603,14 @@ async fn reload_models(
                     .get(id)
                     .cloned()
                     .map(Ok)
-                    .unwrap_or_else(|| verify_installed(&root, id, full_verify))
+                    .unwrap_or_else(|| verify_installed(&root, id, plan.full_verify))
                     .map_err(|error| error.to_string());
                 (id, result)
             })
             .collect::<HashMap<_, _>>();
         let mut ready_workers = [0usize; 3];
         let mut errors = [Vec::<String>::new(), Vec::new(), Vec::new()];
-        let worker_limit = requested_limit.clamp(1, engines.len());
+        let worker_limit = plan.worker_limit.clamp(1, engines.len());
         for (index, id) in ["raner-v1", "ppocrv4-mobile-v1", "ppocrv4-accurate-v1"]
             .into_iter()
             .enumerate()
@@ -621,6 +632,18 @@ async fn reload_models(
                 .into_iter()
                 .enumerate()
             {
+                if index == 1 && !plan.mobile_ocr {
+                    if e.ocr_mobile.is_some() {
+                        ready_workers[index] += 1;
+                    }
+                    continue;
+                }
+                if index == 2 && !plan.accurate_ocr {
+                    if e.ocr_accurate.is_some() {
+                        ready_workers[index] += 1;
+                    }
+                    continue;
+                }
                 let slot_ready = match index {
                     0 => e.ner.is_some(),
                     1 => e.ocr_mobile.is_some(),
@@ -634,19 +657,39 @@ async fn reload_models(
                     }
                     continue;
                 };
-                if reuse_loaded && slot_ready {
+                if plan.reuse_loaded && slot_ready {
                     ready_workers[index] += 1;
                     continue;
                 }
+                let label = match index {
+                    0 => "中文实体识别",
+                    1 => "轻量 OCR",
+                    _ => "高精度 OCR",
+                };
+                let _ = app.emit(
+                    "model-progress",
+                    serde_json::json!({
+                        "id": id,
+                        "stage": "loading",
+                        "percent": 100.0,
+                        "message": format!("正在加载{label}到本机内存")
+                    }),
+                );
                 let loaded = match index {
-                    0 => recognition::ner::Raner::load_verified(package).map(|model| {
+                    0 => recognition::ner::Raner::load_verified(package).and_then(|mut model| {
+                        recognition::Ner::analyze(&mut model, "张三在北京工作")?;
                         e.ner = Some(Box::new(model));
+                        Ok(())
                     }),
-                    1 => recognition::ocr::PpOcr::load_verified(package).map(|model| {
+                    1 => recognition::ocr::PpOcr::load_verified(package).and_then(|mut model| {
+                        model.warm_up()?;
                         e.ocr_mobile = Some(Box::new(model));
+                        Ok(())
                     }),
-                    _ => recognition::ocr::PpOcr::load_verified(package).map(|model| {
+                    _ => recognition::ocr::PpOcr::load_verified(package).and_then(|mut model| {
+                        model.warm_up()?;
                         e.ocr_accurate = Some(Box::new(model));
+                        Ok(())
                     }),
                 };
                 match loaded {
@@ -824,17 +867,37 @@ async fn ensure_default_models(
         };
         verified.insert(id.to_owned(), model);
     }
-    let result = reload_models(&state, app.clone(), verified.clone(), true, false, 1).await?;
-    if result.ready && state.desired_workers.load(Ordering::Acquire) > 1 {
+    let result = reload_models(
+        &state,
+        app.clone(),
+        verified.clone(),
+        ModelLoadPlan {
+            reuse_loaded: true,
+            full_verify: false,
+            worker_limit: 1,
+            mobile_ocr: false,
+            accurate_ocr: false,
+        },
+    )
+    .await?;
+    if result.ready {
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
             let _guard = state.model_operations.lock().await;
             let desired = state.desired_workers.load(Ordering::Acquire);
-            if desired <= state.worker_limit.load(Ordering::Acquire) {
-                return;
-            }
-            let warmed =
-                reload_models(&state, app.clone(), verified.clone(), true, false, desired).await;
+            let warmed = reload_models(
+                &state,
+                app.clone(),
+                verified.clone(),
+                ModelLoadPlan {
+                    reuse_loaded: true,
+                    full_verify: false,
+                    worker_limit: desired,
+                    mobile_ocr: true,
+                    accurate_ocr: false,
+                },
+            )
+            .await;
             if warmed.as_ref().is_ok_and(|status| {
                 status.ready
                     && status
@@ -844,7 +907,19 @@ async fn ensure_default_models(
             }) {
                 let _ = activate_workers(&state, desired);
             } else {
-                let _ = reload_models(&state, app.clone(), verified, true, false, 1).await;
+                let _ = reload_models(
+                    &state,
+                    app.clone(),
+                    verified,
+                    ModelLoadPlan {
+                        reuse_loaded: true,
+                        full_verify: false,
+                        worker_limit: 1,
+                        mobile_ocr: true,
+                        accurate_ocr: false,
+                    },
+                )
+                .await;
             }
         });
     }
@@ -873,9 +948,13 @@ async fn install_model(
         &state,
         app,
         HashMap::new(),
-        true,
-        false,
-        state.worker_limit.load(Ordering::Acquire),
+        ModelLoadPlan {
+            reuse_loaded: true,
+            full_verify: false,
+            worker_limit: state.worker_limit.load(Ordering::Acquire),
+            mobile_ocr: package_id == "ppocrv4-mobile-v1",
+            accurate_ocr: package_id == "ppocrv4-accurate-v1",
+        },
     )
     .await
 }
@@ -947,9 +1026,13 @@ async fn rebuild_model(
             &state,
             app,
             HashMap::new(),
-            true,
-            false,
-            state.worker_limit.load(Ordering::Acquire),
+            ModelLoadPlan {
+                reuse_loaded: true,
+                full_verify: false,
+                worker_limit: state.worker_limit.load(Ordering::Acquire),
+                mobile_ocr: false,
+                accurate_ocr: false,
+            },
         )
         .await;
         return Err(error);
@@ -976,9 +1059,13 @@ async fn rebuild_model(
         &state,
         app,
         HashMap::new(),
-        true,
-        false,
-        state.worker_limit.load(Ordering::Acquire),
+        ModelLoadPlan {
+            reuse_loaded: true,
+            full_verify: false,
+            worker_limit: state.worker_limit.load(Ordering::Acquire),
+            mobile_ocr: package_id == "ppocrv4-mobile-v1",
+            accurate_ocr: package_id == "ppocrv4-accurate-v1",
+        },
     )
     .await?;
     installed?;
@@ -1004,7 +1091,19 @@ async fn load_models(state: Shared<'_>, app: tauri::AppHandle) -> Result<Runtime
     state.auth.require_authenticated()?;
     let _guard = state.model_operations.lock().await;
     let desired = state.desired_workers.load(Ordering::Acquire);
-    let result = reload_models(&state, app, HashMap::new(), false, true, desired).await?;
+    let result = reload_models(
+        &state,
+        app,
+        HashMap::new(),
+        ModelLoadPlan {
+            reuse_loaded: false,
+            full_verify: true,
+            worker_limit: desired,
+            mobile_ocr: true,
+            accurate_ocr: true,
+        },
+    )
+    .await?;
     if result.ready {
         activate_workers(&state, desired)?;
     }
@@ -1103,7 +1202,7 @@ fn main() {
                     .https_only(true)
                     .connect_timeout(std::time::Duration::from_secs(15))
                     .timeout(std::time::Duration::from_secs(30 * 60))
-                    .user_agent("Sixa/1.0.7")
+                    .user_agent("Sixa/1.0.8")
                     .build()
                     .map_err(|error| error.to_string())?,
                 integration_jobs: integration::JobRegistry::default(),

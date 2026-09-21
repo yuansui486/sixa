@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "proptest",
  "serde",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "formats"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "ab_glyph",
  "domain",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "integration-protocol"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "model-manager"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "domain",
  "fs2",
@@ -3883,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "recognition"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "domain",
  "image",
@@ -4605,7 +4605,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "sixa"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "chrono",
  "domain",
@@ -4631,7 +4631,7 @@ dependencies = [
 
 [[package]]
 name = "sixa-mcp"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "integration-protocol",
  "rmcp",
@@ -4749,7 +4749,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "storage"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -4935,7 +4935,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "task-engine"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
