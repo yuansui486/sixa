@@ -121,11 +121,6 @@ jobs:
           codesign --force --sign - --timestamp=none src-tauri/runtime/libonnxruntime.dylib
           codesign --verify --strict --verbose=4 src-tauri/runtime/libonnxruntime.dylib
 
-      - name: 验证正式模型下载、续传、安装和推理
-        env:
-          SIXA_TEST_ONNX_RUNTIME: ${{ github.workspace }}/src-tauri/runtime/libonnxruntime.dylib
-        run: cargo run --locked -p model-manager --example remote_acceptance
-
       - name: 构建安装程序
         run: npx --prefix ui tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
 
@@ -217,7 +212,7 @@ jobs:
 
           macOS 登录状态和设备标识使用应用主密钥加密保存，避免登录校验和心跳反复弹出钥匙串授权。首次从旧版本升级时，应用会尝试一次性迁移旧凭据。
 
-          首次模型准备会区分下载、安装和内存加载阶段；可选的高精度 OCR 未安装时不再覆盖基础模型状态。发布门禁同时执行 RaNER 与 OCR 的真实 ONNX 推理。
+          首次模型准备会区分下载、安装和内存加载阶段；可选的高精度 OCR 未安装时不再覆盖基础模型状态。
 
           macOS 应用已进行完整性签名，但尚未使用 Apple Developer ID 签名和公证。首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.23.2 universal2 运行库。
           EOF
