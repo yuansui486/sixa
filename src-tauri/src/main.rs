@@ -1103,7 +1103,7 @@ fn main() {
                     .https_only(true)
                     .connect_timeout(std::time::Duration::from_secs(15))
                     .timeout(std::time::Duration::from_secs(30 * 60))
-                    .user_agent("Sixa/1.0.4")
+                    .user_agent("Sixa/1.0.5")
                     .build()
                     .map_err(|error| error.to_string())?,
                 integration_jobs: integration::JobRegistry::default(),
