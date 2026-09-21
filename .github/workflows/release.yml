@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的现有标签，例如 v1.0.0"
+        description: "要发布的现有标签，例如 v1.0.1"
         required: true
-        default: "v1.0.0"
+        default: "v1.0.1"
       publish:
         description: "构建成功后发布 GitHub Release"
         required: true
@@ -122,6 +122,41 @@ jobs:
       - name: 构建安装程序
         run: npx --prefix ui tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
 
+      - name: 验证 macOS 安装包和应用签名
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(find "target/${{ matrix.target }}/release/bundle/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          hdiutil verify "$dmg"
+
+          mount_point="$RUNNER_TEMP/sixa-${{ matrix.target }}"
+          mkdir -p "$mount_point"
+          printf 'Y\n' | hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_point"
+          trap 'hdiutil detach "$mount_point"' EXIT
+
+          app="$(find "$mount_point" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app"
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          executable="$app/Contents/MacOS/$executable_name"
+          test -x "$executable"
+
+          codesign --display --verbose=4 "$app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) expected_arch="arm64" ;;
+            x86_64-apple-darwin) expected_arch="x86_64" ;;
+            *) exit 1 ;;
+          esac
+          lipo -archs "$executable" | tr ' ' '\n' | grep -Fx "$expected_arch"
+
+          runtime="$app/Contents/Resources/libonnxruntime.dylib"
+          test -f "$runtime"
+          file "$runtime"
+          codesign --verify --strict --verbose=4 "$runtime"
+
       - name: 保存安装程序
         uses: actions/upload-artifact@v7
         with:
@@ -171,7 +206,7 @@ jobs:
           - macOS 11+ Intel DMG 安装程序
           - macOS 11+ Apple Silicon DMG 安装程序
 
-          安装程序当前未进行商业代码签名。macOS 首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.22.0 universal2 运行库。
+          macOS 应用已进行完整性签名，但尚未使用 Apple Developer ID 签名和公证。首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.22.0 universal2 运行库。
           EOF
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
