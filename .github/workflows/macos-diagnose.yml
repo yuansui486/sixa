@@ -34,7 +34,7 @@ jobs:
           shasum -a 256 "$dmg"
           hdiutil verify "$dmg"
           mkdir "$RUNNER_TEMP/sixa-volume"
-          hdiutil attach "$dmg" -readonly -nobrowse -acceptlicense -mountpoint "$RUNNER_TEMP/sixa-volume"
+          printf 'Y\n' | hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$RUNNER_TEMP/sixa-volume"
           trap 'hdiutil detach "$RUNNER_TEMP/sixa-volume"' EXIT
           app="$(find "$RUNNER_TEMP/sixa-volume" -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$app"
