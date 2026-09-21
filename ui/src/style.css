@@ -958,6 +958,15 @@ dd {
 .download-progress small {
   color: #758297;
 }
+.download-source {
+  width: fit-content;
+  padding: 3px 7px;
+  border: 1px solid #d7e3df;
+  border-radius: 4px;
+  background: #f2f8f6;
+  color: #35685f;
+  font-size: 11px;
+}
 .setting-line {
   max-width: 360px;
 }

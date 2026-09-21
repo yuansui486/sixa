@@ -87,6 +87,8 @@ type ModelProgressPayload = Partial<ModelStatus> & {
   percent?: number;
   bytes_per_second?: number;
   eta_seconds?: number | null;
+  source?: string | null;
+  source_label?: string | null;
   message?: string;
 };
 
@@ -114,7 +116,9 @@ function modelProgressDetails(progress: ModelProgressPayload): string {
 }
 
 function canCancelModelProgress(stage?: string): boolean {
-  return ["connecting", "downloading", "retrying"].includes(stage ?? "");
+  return ["connecting", "switching_source", "downloading", "retrying"].includes(
+    stage ?? "",
+  );
 }
 
 function useAction() {
@@ -430,6 +434,8 @@ function App({
             percent: payload.percent,
             bytes_per_second: payload.bytes_per_second,
             eta_seconds: payload.eta_seconds,
+            source: payload.source,
+            source_label: payload.source_label,
             message: payload.message ?? modelStageLabel(payload.stage ?? ""),
           });
       }),
@@ -604,7 +610,10 @@ function App({
               </span>
             )}
             <small>
-              下载来源：ModelScope 中国站 · 下载中断后可以继续 · 已安装模型可离线使用
+              {setupProgress.source_label
+                ? `当前来源：${setupProgress.source_label}`
+                : "优先使用阿里云 OSS"}
+              {" · 下载失败时自动切换 ModelScope · 支持断点续传"}
             </small>
           </section>
         ) : (
@@ -628,7 +637,8 @@ function modelStageLabel(stage: string): string {
     (
       {
         verifying: "正在校验模型",
-        connecting: "正在连接 ModelScope 中国站",
+        connecting: "正在连接模型下载源",
+        switching_source: "正在切换备用下载源",
         retrying: "正在重新下载模型",
         downloading: "正在下载模型",
         installing: "正在安装模型",
@@ -2484,6 +2494,8 @@ function Models() {
           percent: payload.percent ?? 0,
           bytes_per_second: payload.bytes_per_second,
           eta_seconds: payload.eta_seconds,
+          source: payload.source,
+          source_label: payload.source_label,
           message: payload.message ?? "正在处理模型",
         },
       }));
@@ -2495,7 +2507,7 @@ function Models() {
   return (
     <>
       <Heading title="模型管理">
-        模型在本机执行，通过 ModelScope 中国站下载。校验或加载失败时，分析不会继续。
+        模型在本机执行，优先从阿里云 OSS 下载；连接失败时自动切换到 ModelScope 备用源。
       </Heading>
       <Feedback
         {...action}
@@ -2567,6 +2579,11 @@ function Models() {
                   <span>{progress[item.id].message}</span>
                   <strong>{(progress[item.id].percent ?? 0).toFixed(0)}%</strong>
                 </div>
+                {progress[item.id].source_label && (
+                  <span className="download-source">
+                    当前来源：{progress[item.id].source_label}
+                  </span>
+                )}
                 {modelProgressDetails(progress[item.id]) && (
                   <small>{modelProgressDetails(progress[item.id])}</small>
                 )}

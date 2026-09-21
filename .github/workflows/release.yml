@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的现有标签，例如 v1.0.2"
+        description: "要发布的现有标签，例如 v1.0.3"
         required: true
-        default: "v1.0.2"
+        default: "v1.0.3"
       publish:
         description: "构建成功后发布 GitHub Release"
         required: true
@@ -208,7 +208,7 @@ jobs:
           - macOS 11+ Intel DMG 安装程序
           - macOS 11+ Apple Silicon DMG 安装程序
 
-          模型通过 ModelScope 中国站及其境内 CDN 下载，支持中断后继续。下载界面会显示当前阶段、百分比、已下载大小、实时速度和预计剩余时间。
+          模型优先通过阿里云 OSS 北京公网地址下载，失败时自动切换到 ModelScope 备用源。两个来源共享断点，下载界面会显示当前来源、切换状态、百分比、已下载大小、实时速度和预计剩余时间。
 
           macOS 应用已进行完整性签名，但尚未使用 Apple Developer ID 签名和公证。首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.22.0 universal2 运行库。
           EOF

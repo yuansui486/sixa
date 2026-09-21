@@ -20,7 +20,7 @@
 | 图片 | PNG、JPEG、BMP、多页 TIFF 的解码、OCR、区域复核、手工区域、预览和原格式输出；强模糊叠加局部背景色，按区域适配字号和前景色，180 度 OCR 区域按原方向绘制自然中文替换文字 |
 | PDF | MuPDF 安全重建会逐页栅格化后创建新 PDF，移除旧文字层、附件和旧对象；保真模式应用真实 redaction，再插入脱敏图块；导出前检查页数、附件和敏感文字二次提取，检查失败即禁止导出 |
 | Office | DOCX、XLSX、XLSM 已接入任务引擎、工作台和批量流程；处理跨 run 文本、表格、页眉页脚、批注、公式及缓存、链接、隐藏表、定义名称、文本框相关 XML 和支持的内嵌图片；未修改 ZIP entry raw-copy，XLSM VBA 原字节保留，失效数字签名移除并报告；OLE/ActiveX 因无法完整审计而拒绝 |
-| ModelScope | 应用固定到公开仓库 `yuansui486/data_desensitization_0918` 的 `desktop-models-v1.0.0` revision；目录 SHA-256 固化在程序内；三个模型包首次启动自动断点下载、校验、原子安装并加载，支持取消和中文错误信息 |
+| 模型下载 | 阿里云 OSS 北京公网地址为主源，ModelScope `desktop-models-v1.0.0` 为备用源；跨源保留断点并严格检查 `206 Content-Range`，最终执行固定 SHA-256、原子安装和运行清单校验；UI 显示当前来源及自动切换状态 |
 | 取消和并发 | 分析前生成任务 ID；排队、ONNX 推理、逐页图片/PDF、逐个 Office 媒体、逐个 ZIP entry 和批量任务均检查取消；ORT 活跃推理可 terminate；1-4 个独立 Engine worker、信号量限流、原子 worker lease 和 SQLite WAL/busy timeout 支持有界并发 |
 | 中文 UI | 固定流程“选择文件 → 自动识别 → 复核实体/区域 → 预览 → 生成并导出”；工作台、批量、历史、识别规则、脱敏方式、模型管理和恢复页面均为中文；批量选择器覆盖全部正式格式并提供批次取消 |
 
@@ -28,9 +28,11 @@ Rust workspace 为 `domain`、`recognition`、`formats`、`storage`、`model-man
 
 ## 模型发布
 
-公开版本：[ModelScope desktop-models-v1.0.0](https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/tags/desktop-models-v1.0.0)
+主下载目录：[阿里云 OSS desktop-models-v1.0.0](https://tct12-visitors.oss-cn-beijing.aliyuncs.com/sixa/models/desktop-models-v1.0.0/desktop/catalog.json)
 
-- 固定目录 SHA-256：`1b91ec357c0908192a94a9c21f145fd1fb48f686c442ca7d2db3223e611819a0`
+备用版本：[ModelScope desktop-models-v1.0.0](https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/tags/desktop-models-v1.0.0)
+
+- 双源目录 SHA-256：`c38e8458651d4b2c32d780822934ea6b512c3954fa961a6eb09671903a26561b`
 - RaNER 包：`4386188a3453e20f703feb009f3c731a1adea654b87747bfd292cca05ce3e6b1`
 - PP-OCRv4 mobile 包：`b260c430ed85d3ebe0bbf37705cdbcf33a11be41be691ded77df470b4e83a832`
 - PP-OCRv4 accurate 包：`6e9ded592fa160877168b5d1c51e802210473f645d2800c5c150548f922cde07`

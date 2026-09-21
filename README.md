@@ -8,7 +8,7 @@
 
 Windows 安装包附带通用 MCP stdio 服务，供本机 AI 工具异步创建、查询、等待和取消脱敏任务。桌面应用必须保持运行并已登录；MCP 通过当前 Windows 用户专属的命名管道通信，不开放 HTTP 端口，也不修改 `PATH`。外部调用使用桌面中现有规则和脱敏方式，只返回任务状态、计数及输出路径，不返回正文或实体值。macOS 当前不提供 MCP sidecar。配置和工具说明见 [AI 工具接入](docs/ai-mcp-integration.md)。
 
-首次启动自动安装 RaNER 与轻量 PP-OCRv4；高精度 OCR 可在模型管理页按需安装。模型从固定版本的 [ModelScope 仓库](https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/tags/desktop-models-v1.0.0) 下载，支持中断续传。安装包及解压结果执行 SHA-256 校验；后续启动只检查清单和必需文件。第一套模型加载后工作台即可使用，其他 worker 在后台预热，预热完成前只调度已就绪的 worker。模型页提供手动完整校验和确认后清空单个模型目录并重新下载的“重建模型”。文件内容损坏可能在加载时才报错；对应分析会被阻止。桌面数据继续保存在兼容目录 `%LOCALAPPDATA%\LocalDesensitization\`，升级到私匣后不会重复下载模型或丢失现有任务。
+首次启动自动安装 RaNER 与轻量 PP-OCRv4；高精度 OCR 可在模型管理页按需安装。模型优先从北京地域的阿里云 OSS 公网地址下载，连接或续传失败时自动切换到固定版本的 [ModelScope 备用仓库](https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/tags/desktop-models-v1.0.0)。两个来源共享断点文件，切换来源不会从头开始；最终安装包及解压结果仍执行 SHA-256 校验。后续启动只检查清单和必需文件。第一套模型加载后工作台即可使用，其他 worker 在后台预热，预热完成前只调度已就绪的 worker。模型页会显示当前下载源、速度、剩余时间和自动切换状态，并提供手动完整校验和确认后清空单个模型目录再下载的“重建模型”。文件内容损坏可能在加载时才报错；对应分析会被阻止。桌面数据继续保存在兼容目录 `%LOCALAPPDATA%\LocalDesensitization\`，升级到私匣后不会重复下载模型或丢失现有任务。
 
 ## 构建和验证
 

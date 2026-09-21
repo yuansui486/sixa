@@ -4,7 +4,7 @@ use model_manager::{Cancellation, download_and_install, fetch_catalog};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder()
         .https_only(true)
-        .user_agent("Sixa/0.3")
+        .user_agent("Sixa/1.0.3")
         .build()?;
     let catalog = fetch_catalog(&client)
         .await

@@ -609,14 +609,31 @@ test("模型下载展示进度、速度和剩余时间", async ({ page }) => {
       percent: 50,
       bytes_per_second: 1024 * 1024,
       eta_seconds: 50,
-      message: "正在下载 中文实体识别模型",
+      source: "https://example.invalid/raner-v1.zip",
+      source_label: "阿里云 OSS",
+      message: "正在从 阿里云 OSS 下载 中文实体识别模型",
     }),
   );
   const progress = page.locator(".download-progress");
-  await expect(progress).toContainText("正在下载 中文实体识别模型");
+  await expect(progress).toContainText("正在从 阿里云 OSS 下载 中文实体识别模型");
+  await expect(progress).toContainText("当前来源：阿里云 OSS");
   await expect(progress).toContainText("50%");
   await expect(progress).toContainText("50 MB / 100 MB");
   await expect(progress).toContainText("1.0 MB/秒");
   await expect(progress).toContainText("约 50 秒");
   await expect(page.getByRole("button", { name: "取消下载" })).toBeVisible();
+
+  await page.evaluate(() =>
+    window.__mock__.emit("model-progress", {
+      id: "raner-v1",
+      stage: "switching_source",
+      current: 50 * 1024 * 1024,
+      total: 100 * 1024 * 1024,
+      percent: 50,
+      source_label: "ModelScope 备用源",
+      message: "阿里云 OSS 下载失败，正在切换到 ModelScope 备用源并继续下载",
+    }),
+  );
+  await expect(progress).toContainText("正在切换到 ModelScope 备用源");
+  await expect(progress).toContainText("当前来源：ModelScope 备用源");
 });
