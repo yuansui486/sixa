@@ -90,9 +90,6 @@ jobs:
       - name: 安装前端依赖
         run: npm ci --prefix ui
 
-      - name: 验证正式模型下载、续传和自动安装
-        run: cargo run --locked -p model-manager --example remote_acceptance
-
       - name: 构建 Windows MCP sidecar
         if: runner.os == 'Windows'
         shell: pwsh
@@ -123,6 +120,11 @@ jobs:
             src-tauri/runtime/ONNXRuntime-ThirdPartyNotices.txt
           codesign --force --sign - --timestamp=none src-tauri/runtime/libonnxruntime.dylib
           codesign --verify --strict --verbose=4 src-tauri/runtime/libonnxruntime.dylib
+
+      - name: 验证正式模型下载、续传、安装和推理
+        env:
+          SIXA_TEST_ONNX_RUNTIME: ${{ github.workspace }}/src-tauri/runtime/libonnxruntime.dylib
+        run: cargo run --locked -p model-manager --example remote_acceptance
 
       - name: 构建安装程序
         run: npx --prefix ui tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}

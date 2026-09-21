@@ -2785,6 +2785,7 @@ version = "1.0.4"
 dependencies = [
  "domain",
  "fs2",
+ "image",
  "recognition",
  "reqwest 0.12.28",
  "serde",

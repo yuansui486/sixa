@@ -15,5 +15,6 @@ tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 fs2 = "0.4"
 [dev-dependencies]
+image = { version = "0.25", default-features = false }
 uuid.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

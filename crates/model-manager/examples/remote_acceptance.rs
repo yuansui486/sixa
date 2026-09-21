@@ -1,4 +1,19 @@
 use model_manager::{Cancellation, download_and_install, fetch_catalog};
+use recognition::ocr::{Ocr, OcrRun, PpOcr};
+use std::path::Path;
+
+#[cfg(target_os = "macos")]
+fn install_test_runtime(model_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let source = std::env::var_os("SIXA_TEST_ONNX_RUNTIME")
+        .ok_or("SIXA_TEST_ONNX_RUNTIME is required on macOS")?;
+    std::fs::copy(source, model_dir.join("libonnxruntime.dylib"))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_test_runtime(_model_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -112,18 +127,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if first_progress <= partial_bytes {
         return Err("download did not advance from the partial offset".into());
     }
-    recognition::models::verify_with_required(
-        &installed,
-        &[
-            "det.onnx",
-            "cls.onnx",
-            "rec.onnx",
-            "dict.txt",
-            "ocr-config.json",
-            "onnxruntime.dll",
-        ],
-    )
-    .map_err(|error| format!("verify installed model: {error}"))?;
+    recognition::models::verify_with_required(&installed, recognition::models::OCR_MODEL_FILES)
+        .map_err(|error| format!("verify installed model: {error}"))?;
+    install_test_runtime(&installed)?;
+    let mut ocr = PpOcr::load(&installed).map_err(|error| format!("load OCR model: {error}"))?;
+    let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
+    let lines = ocr
+        .recognize(&image, &OcrRun::new()?)
+        .map_err(|error| format!("run OCR inference: {error}"))?;
     println!(
         "{}",
         serde_json::json!({
@@ -131,7 +142,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "package": package.id,
             "partial_bytes": partial_bytes,
             "first_resumed_progress": first_progress,
-            "installed": true
+            "installed": true,
+            "inference": true,
+            "detected_lines": lines.len()
         })
     );
     Ok(())
