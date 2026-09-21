@@ -1043,7 +1043,7 @@ fn main() {
                 })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             app.manage(AppState {
-                auth: auth::AuthManager::new()?,
+                auth: auth::AuthManager::new(&root, key.clone())?,
                 engines: Arc::new(engines),
                 next_engine: AtomicUsize::new(0),
                 worker_limit: AtomicUsize::new(1),
@@ -1103,7 +1103,7 @@ fn main() {
                     .https_only(true)
                     .connect_timeout(std::time::Duration::from_secs(15))
                     .timeout(std::time::Duration::from_secs(30 * 60))
-                    .user_agent("Sixa/1.0.5")
+                    .user_agent("Sixa/1.0.6")
                     .build()
                     .map_err(|error| error.to_string())?,
                 integration_jobs: integration::JobRegistry::default(),

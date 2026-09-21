@@ -94,22 +94,29 @@ type ModelProgressPayload = Partial<ModelStatus> & {
 
 function formatRemaining(seconds?: number | null): string {
   if (!seconds || seconds <= 0) return "";
-  if (seconds < 60) return `约 ${Math.ceil(seconds)} 秒`;
-  if (seconds < 3600) return `约 ${Math.ceil(seconds / 60)} 分钟`;
+  if (seconds < 60) return `${Math.ceil(seconds)} 秒`;
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)} 分钟`;
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.ceil((seconds % 3600) / 60);
-  return `约 ${hours} 小时${minutes ? ` ${minutes} 分钟` : ""}`;
+  return `${hours} 小时${minutes ? ` ${minutes} 分钟` : ""}`;
 }
 
 function modelProgressDetails(progress: ModelProgressPayload): string {
+  const downloading = [
+    "connecting",
+    "switching_source",
+    "downloading",
+    "retrying",
+  ].includes(progress.stage ?? "");
+  const remaining = formatRemaining(progress.eta_seconds);
   return [
     progress.total
-      ? `${formatBytes(progress.current)} / ${formatBytes(progress.total)}`
+      ? `已下载 ${formatBytes(progress.current)} / ${formatBytes(progress.total)}`
       : "",
-    progress.bytes_per_second
-      ? `${formatBytes(progress.bytes_per_second)}/秒`
+    downloading
+      ? `下载速度 ${progress.bytes_per_second ? `${formatBytes(progress.bytes_per_second)}/秒` : "计算中"}`
       : "",
-    formatRemaining(progress.eta_seconds),
+    remaining ? `预计剩余 ${remaining}` : "",
   ]
     .filter(Boolean)
     .join(" · ");

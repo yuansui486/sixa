@@ -618,9 +618,9 @@ test("模型下载展示进度、速度和剩余时间", async ({ page }) => {
   await expect(progress).toContainText("正在从 阿里云 OSS 下载 中文实体识别模型");
   await expect(progress).toContainText("当前来源：阿里云 OSS");
   await expect(progress).toContainText("50%");
-  await expect(progress).toContainText("50 MB / 100 MB");
-  await expect(progress).toContainText("1.0 MB/秒");
-  await expect(progress).toContainText("约 50 秒");
+  await expect(progress).toContainText("已下载 50 MB / 100 MB");
+  await expect(progress).toContainText("下载速度 1.0 MB/秒");
+  await expect(progress).toContainText("预计剩余 50 秒");
   await expect(page.getByRole("button", { name: "取消下载" })).toBeVisible();
 
   await page.evaluate(() =>

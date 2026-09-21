@@ -215,6 +215,8 @@ jobs:
 
           模型优先通过阿里云 OSS 北京公网地址下载，失败时自动切换到 ModelScope 备用源。两个来源共享断点，下载界面会显示当前来源、切换状态、百分比、已下载大小、实时速度和预计剩余时间。
 
+          macOS 登录状态和设备标识使用应用主密钥加密保存，避免登录校验和心跳反复弹出钥匙串授权。首次从旧版本升级时，应用会尝试一次性迁移旧凭据。
+
           macOS 应用已进行完整性签名，但尚未使用 Apple Developer ID 签名和公证。首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.23.2 universal2 运行库。
           EOF
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then

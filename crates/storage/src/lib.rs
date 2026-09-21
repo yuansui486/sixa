@@ -395,7 +395,7 @@ pub fn credential_key() -> Result<Zeroizing<[u8; 32]>> {
                 .map_err(|e| Error::Io(e.to_string()))?;
             Ok(key)
         }
-        Err(e) => Err(Error::Io(format!("无法读取 Windows 凭据：{e}"))),
+        Err(e) => Err(Error::Io(format!("无法读取系统安全凭据：{e}"))),
     }
 }
 

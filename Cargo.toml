@@ -4,7 +4,7 @@ default-members = ["crates/domain", "crates/recognition", "crates/formats", "cra
 resolver = "2"
 
 [workspace.package]
-version = "1.0.5"
+version = "1.0.6"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 rust-version = "1.95"

@@ -1,14 +1,19 @@
 use chrono::{DateTime, Utc};
 use domain::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use zeroize::Zeroizing;
 
 const PRODUCT_PATH: &str = "/auth/products/data-desensitization/sessions";
-const SESSION_CREDENTIAL: &str = "auth-session-v1";
-const DEVICE_CREDENTIAL: &str = "device-id-v1";
-const CREDENTIAL_SERVICE: &str = "LocalDesensitization";
+const LEGACY_CREDENTIAL_SERVICE: &str = "LocalDesensitization";
+const LEGACY_SESSION_CREDENTIAL: &str = "auth-session-v1";
+const LEGACY_DEVICE_CREDENTIAL: &str = "device-id-v1";
 const CLOCK_ROLLBACK_TOLERANCE_SECONDS: i64 = 300;
+const AUTH_STATE_SCHEMA: u32 = 1;
+const AUTH_STATE_AAD: &[u8] = b"sixa-auth-state-v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthSubject {
@@ -62,6 +67,108 @@ struct StoredSession {
     last_observed_at: i64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct StoredAuthState {
+    schema: u32,
+    device_id: String,
+    session: Option<StoredSession>,
+}
+
+struct AuthPersistence {
+    path: PathBuf,
+    key: Zeroizing<[u8; 32]>,
+    device_id: String,
+}
+
+impl AuthPersistence {
+    fn open(
+        root: &Path,
+        key: Zeroizing<[u8; 32]>,
+        migrate_legacy: bool,
+    ) -> Result<(Self, Option<StoredSession>)> {
+        std::fs::create_dir_all(root.join("db"))?;
+        let path = root.join("db/auth-state.enc");
+        let state = if path.is_file() {
+            let encrypted = std::fs::read(&path)?;
+            let plain = Zeroizing::new(storage::vault::open(&key, &encrypted, AUTH_STATE_AAD)?);
+            let state: StoredAuthState =
+                serde_json::from_slice(&plain).map_err(|_| Error::Authentication)?;
+            validate_auth_state(&state)?;
+            state
+        } else if migrate_legacy {
+            read_legacy_auth_state().unwrap_or_else(new_auth_state)
+        } else {
+            new_auth_state()
+        };
+        let persistence = Self {
+            path,
+            key,
+            device_id: state.device_id,
+        };
+        if !persistence.path.is_file() {
+            persistence.write_session(state.session.as_ref())?;
+        }
+        Ok((persistence, state.session))
+    }
+
+    fn write_session(&self, session: Option<&StoredSession>) -> Result<()> {
+        let state = StoredAuthState {
+            schema: AUTH_STATE_SCHEMA,
+            device_id: self.device_id.clone(),
+            session: session.cloned(),
+        };
+        let plain = Zeroizing::new(
+            serde_json::to_vec(&state).map_err(|error| Error::Io(error.to_string()))?,
+        );
+        let encrypted = storage::vault::seal(&self.key, &plain, AUTH_STATE_AAD)?;
+        storage::atomic_write(&self.path, &encrypted)
+    }
+}
+
+fn new_auth_state() -> StoredAuthState {
+    StoredAuthState {
+        schema: AUTH_STATE_SCHEMA,
+        device_id: uuid::Uuid::new_v4().to_string(),
+        session: None,
+    }
+}
+
+fn read_legacy_auth_state() -> Option<StoredAuthState> {
+    let session = match keyring::Entry::new(LEGACY_CREDENTIAL_SERVICE, LEGACY_SESSION_CREDENTIAL)
+        .ok()?
+        .get_secret()
+    {
+        Ok(secret) => serde_json::from_slice(&secret).ok(),
+        Err(keyring::Error::NoEntry) => None,
+        Err(_) => return None,
+    };
+    let device_id = match keyring::Entry::new(LEGACY_CREDENTIAL_SERVICE, LEGACY_DEVICE_CREDENTIAL)
+        .ok()?
+        .get_secret()
+    {
+        Ok(secret) => String::from_utf8(secret)
+            .ok()
+            .filter(|value| uuid::Uuid::parse_str(value).is_ok()),
+        Err(keyring::Error::NoEntry) => None,
+        Err(_) => return None,
+    };
+    if session.is_none() && device_id.is_none() {
+        return None;
+    }
+    Some(StoredAuthState {
+        schema: AUTH_STATE_SCHEMA,
+        device_id: device_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        session,
+    })
+}
+
+fn validate_auth_state(state: &StoredAuthState) -> Result<()> {
+    if state.schema != AUTH_STATE_SCHEMA || uuid::Uuid::parse_str(&state.device_id).is_err() {
+        return Err(Error::Authentication);
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct LoginRequest<'a> {
     tenant_code: &'a str,
@@ -108,10 +215,11 @@ pub struct AuthManager {
     api_base: String,
     session: Mutex<Option<StoredSession>>,
     operation: tokio::sync::Mutex<()>,
+    persistence: AuthPersistence,
 }
 
 impl AuthManager {
-    pub fn new() -> Result<Self> {
+    pub fn new(root: &Path, key: Zeroizing<[u8; 32]>) -> Result<Self> {
         let api_base = option_env!("LOCAL_DESENSITIZATION_AUTH_API_BASE")
             .unwrap_or("https://dongdongkc.shierkeji.com:6201/ua2/api/v1")
             .trim_end_matches('/')
@@ -123,12 +231,13 @@ impl AuthManager {
             .user_agent(concat!("Sixa/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| Error::Io(error.to_string()))?;
-        let session = read_session()?;
+        let (persistence, session) = AuthPersistence::open(root, key, true)?;
         Ok(Self {
             client,
             api_base,
             session: Mutex::new(session),
             operation: tokio::sync::Mutex::new(()),
+            persistence,
         })
     }
 
@@ -183,14 +292,14 @@ impl AuthManager {
             .map_err(network_error)?;
         let login: LoginResponse = decode_response(login).await.map_err(request_error)?;
         let access_token = Zeroizing::new(login.access_token);
-        let device_id = device_id()?;
+        let device_id = &self.persistence.device_id;
         let device_name = device_name();
         let created = self
             .client
             .post(format!("{}{}", self.api_base, PRODUCT_PATH))
             .bearer_auth(access_token.as_str())
             .json(&CreateSessionRequest {
-                device_id: &device_id,
+                device_id,
                 device_name: &device_name,
                 app_version: env!("CARGO_PKG_VERSION"),
             })
@@ -207,7 +316,7 @@ impl AuthManager {
             offline_until: created.offline_until.timestamp(),
             last_observed_at: now,
         };
-        write_session(&stored)?;
+        self.persistence.write_session(Some(&stored))?;
         *self.session.lock().map_err(poisoned)? = Some(stored.clone());
         Ok(status_from_session(&stored, false))
     }
@@ -231,7 +340,7 @@ impl AuthManager {
                 .send()
                 .await;
         }
-        clear_session()?;
+        self.persistence.write_session(None)?;
         *self.session.lock().map_err(poisoned)? = None;
         Ok(())
     }
@@ -258,24 +367,31 @@ impl AuthManager {
                         offline_until: heartbeat.offline_until.timestamp(),
                         last_observed_at: now,
                     };
-                    write_session(&refreshed)?;
+                    self.persistence.write_session(Some(&refreshed))?;
                     *self.session.lock().map_err(poisoned)? = Some(refreshed.clone());
                     Ok(status_from_session(&refreshed, false))
                 }
                 Err(RequestFailure::Rejected(reason)) => {
-                    clear_session()?;
+                    self.persistence.write_session(None)?;
                     *self.session.lock().map_err(poisoned)? = None;
                     Ok(AuthStatus::signed_out(Some(reason)))
                 }
-                Err(RequestFailure::Unavailable(reason)) => offline_status(session, lease, reason),
-                Err(RequestFailure::Network(reason)) => offline_status(session, lease, reason),
+                Err(RequestFailure::Unavailable(reason)) => {
+                    offline_status(&self.persistence, session, lease, reason)
+                }
+                Err(RequestFailure::Network(reason)) => {
+                    offline_status(&self.persistence, session, lease, reason)
+                }
             },
-            Err(error) => offline_status(session, lease, network_message(&error)),
+            Err(error) => {
+                offline_status(&self.persistence, session, lease, network_message(&error))
+            }
         }
     }
 }
 
 fn offline_status(
+    persistence: &AuthPersistence,
     mut session: StoredSession,
     lease: LeaseState,
     network_reason: String,
@@ -283,7 +399,7 @@ fn offline_status(
     match lease {
         LeaseState::Valid => {
             session.last_observed_at = session.last_observed_at.max(unix_time());
-            write_session(&session)?;
+            persistence.write_session(Some(&session))?;
             Ok(status_from_session(&session, true))
         }
         LeaseState::ClockRollback => Ok(AuthStatus::signed_out(Some(
@@ -370,65 +486,13 @@ fn network_message(error: &reqwest::Error) -> String {
     }
 }
 
-fn credential(name: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(CREDENTIAL_SERVICE, name).map_err(|error| Error::Io(error.to_string()))
-}
-
-fn read_session() -> Result<Option<StoredSession>> {
-    match credential(SESSION_CREDENTIAL)?.get_secret() {
-        Ok(secret) => match serde_json::from_slice(&secret) {
-            Ok(session) => Ok(Some(session)),
-            Err(_) => {
-                clear_session()?;
-                Ok(None)
-            }
-        },
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(Error::Io(format!("无法读取登录凭据：{error}"))),
-    }
-}
-
-fn write_session(session: &StoredSession) -> Result<()> {
-    let secret =
-        Zeroizing::new(serde_json::to_vec(session).map_err(|error| Error::Io(error.to_string()))?);
-    credential(SESSION_CREDENTIAL)?
-        .set_secret(secret.as_slice())
-        .map_err(|error| Error::Io(format!("无法保存登录凭据：{error}")))
-}
-
-fn clear_session() -> Result<()> {
-    match credential(SESSION_CREDENTIAL)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(Error::Io(format!("无法清除登录凭据：{error}"))),
-    }
-}
-
-fn device_id() -> Result<String> {
-    let entry = credential(DEVICE_CREDENTIAL)?;
-    match entry.get_secret() {
-        Ok(secret) => {
-            let value =
-                String::from_utf8(secret).map_err(|_| Error::Io("设备凭据已损坏".into()))?;
-            uuid::Uuid::parse_str(&value).map_err(|_| Error::Io("设备凭据已损坏".into()))?;
-            Ok(value)
-        }
-        Err(keyring::Error::NoEntry) => {
-            let value = uuid::Uuid::new_v4().to_string();
-            entry
-                .set_secret(value.as_bytes())
-                .map_err(|error| Error::Io(format!("无法保存设备凭据：{error}")))?;
-            Ok(value)
-        }
-        Err(error) => Err(Error::Io(format!("无法读取设备凭据：{error}"))),
-    }
-}
-
 fn device_name() -> String {
     std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Windows 设备".into())
+        .unwrap_or_else(|| "本机设备".into())
 }
 
 fn unix_time() -> i64 {
@@ -464,6 +528,30 @@ fn offline_lease(now: i64, last_observed_at: i64, offline_until: i64) -> LeaseSt
 mod tests {
     use super::*;
 
+    fn stored_session() -> StoredSession {
+        StoredSession {
+            token: "secret-session-token".into(),
+            subject: AuthSubject {
+                id: "user-1".into(),
+                username: "admin".into(),
+                display_name: Some("管理员".into()),
+                tenant_id: "tenant-1".into(),
+                tenant_code: "demo".into(),
+                tenant_name: "演示租户".into(),
+            },
+            policy: ProductPolicy {
+                product_code: "data-desensitization".into(),
+                module_enabled: true,
+                concurrent_device_limit: 3,
+                active_session_count: 1,
+                heartbeat_interval_seconds: 600,
+                offline_grace_seconds: 86_400,
+            },
+            offline_until: 2_000,
+            last_observed_at: 1_000,
+        }
+    }
+
     #[test]
     fn offline_lease_rejects_expiry_and_clock_rollback() {
         assert_eq!(offline_lease(1_000, 900, 2_000), LeaseState::Valid);
@@ -481,5 +569,37 @@ mod tests {
             localized_error(403, None),
             "当前租户尚未开通私匣（本机数据脱敏）"
         );
+    }
+
+    #[test]
+    fn auth_state_is_encrypted_and_survives_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let key = Zeroizing::new([41; 32]);
+        let (persistence, session) =
+            AuthPersistence::open(root.path(), key.clone(), false).unwrap();
+        assert!(session.is_none());
+        let device_id = persistence.device_id.clone();
+        let session = stored_session();
+        persistence.write_session(Some(&session)).unwrap();
+
+        let bytes = std::fs::read(root.path().join("db/auth-state.enc")).unwrap();
+        assert!(
+            !bytes
+                .windows(session.token.len())
+                .any(|window| window == session.token.as_bytes())
+        );
+
+        let (reopened, loaded) = AuthPersistence::open(root.path(), key, false).unwrap();
+        let loaded = loaded.unwrap();
+        assert_eq!(reopened.device_id, device_id);
+        assert_eq!(loaded.token, session.token);
+        assert_eq!(loaded.subject, session.subject);
+    }
+
+    #[test]
+    fn auth_state_rejects_the_wrong_key() {
+        let root = tempfile::tempdir().unwrap();
+        AuthPersistence::open(root.path(), Zeroizing::new([7; 32]), false).unwrap();
+        assert!(AuthPersistence::open(root.path(), Zeroizing::new([8; 32]), false).is_err());
     }
 }
