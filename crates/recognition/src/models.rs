@@ -142,7 +142,7 @@ pub fn inspect_with_required(dir: &Path, required: &[&str]) -> Result<Manifest> 
 fn check_with_required(dir: &Path, required: &[&str], hash_files: bool) -> Result<Manifest> {
     let manifest: Manifest = serde_json::from_slice(
         &std::fs::read(dir.join("manifest.json"))
-            .map_err(|_| Error::ModelsNotReady("未安装 RaNER ONNX 模型包".into()))?,
+            .map_err(|_| Error::ModelsNotReady("未安装模型包".into()))?,
     )
     .map_err(|e| Error::ModelsNotReady(e.to_string()))?;
     if manifest.schema != 1 || manifest.version.is_empty() || manifest.files.is_empty() {

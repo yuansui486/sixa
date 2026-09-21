@@ -572,7 +572,7 @@ async fn reload_models(
         serde_json::json!({
             "stage": "loading",
             "percent": 100.0,
-            "message": "正在将模型加载到本机内存"
+            "message": "模型文件已就绪，正在加载到本机内存，首次加载可能需要几十秒"
         }),
     );
     let engines = state.engines.clone();
@@ -1103,7 +1103,7 @@ fn main() {
                     .https_only(true)
                     .connect_timeout(std::time::Duration::from_secs(15))
                     .timeout(std::time::Duration::from_secs(30 * 60))
-                    .user_agent("Sixa/1.0.6")
+                    .user_agent("Sixa/1.0.7")
                     .build()
                     .map_err(|error| error.to_string())?,
                 integration_jobs: integration::JobRegistry::default(),

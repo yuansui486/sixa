@@ -189,7 +189,11 @@ test.beforeEach(async ({ page }) => {
         ],
       }),
       load_models: () => handlers.model_status({}),
-      ensure_default_models: () => handlers.model_status({}),
+      ensure_default_models: () => {
+        if (!new URLSearchParams(location.search).has("delay-model-setup"))
+          return handlers.model_status({});
+        return new Promise(() => {});
+      },
       model_packages: () => [
         {
           id: "raner-v1",
@@ -636,4 +640,26 @@ test("模型下载展示进度、速度和剩余时间", async ({ page }) => {
   );
   await expect(progress).toContainText("正在切换到 ModelScope 备用源");
   await expect(progress).toContainText("当前来源：ModelScope 备用源");
+});
+
+test("基础模型加载状态不被可选高精度 OCR 覆盖", async ({ page }) => {
+  await page.goto("/?delay-model-setup=1#/");
+  const setup = page.locator(".setup-page");
+  await expect(setup.getByRole("heading", { name: "正在准备本机识别能力" })).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__mock__.emit("model-progress", {
+      stage: "loading",
+      percent: 100,
+      message: "模型文件已就绪，正在加载到本机内存，首次加载可能需要几十秒",
+    });
+    window.__mock__.emit("model-progress", {
+      id: "ppocrv4-accurate-v1",
+      stage: "failed",
+      message: "模型未就绪：未安装模型包",
+    });
+  });
+
+  await expect(setup).toContainText("模型文件已就绪，正在加载到本机内存");
+  await expect(setup).not.toContainText("未安装模型包");
 });

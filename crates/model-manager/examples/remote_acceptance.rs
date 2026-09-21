@@ -1,5 +1,6 @@
 use model_manager::{Cancellation, download_and_install, fetch_catalog};
 use recognition::ocr::{Ocr, OcrRun, PpOcr};
+use recognition::{Ner, ner::Raner};
 use std::path::Path;
 
 #[cfg(target_os = "macos")]
@@ -19,7 +20,7 @@ fn install_test_runtime(_model_dir: &Path) -> Result<(), Box<dyn std::error::Err
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder()
         .https_only(true)
-        .user_agent("Sixa/1.0.6")
+        .user_agent("Sixa/1.0.7")
         .build()?;
     let catalog = fetch_catalog(&client)
         .await
@@ -139,6 +140,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .recognize(&image, &OcrRun::new()?)
         .map_err(|error| format!("run OCR inference: {error}"))?;
     eprintln!("inference checkpoint: inference completed");
+
+    let ner_package = catalog
+        .packages
+        .iter()
+        .find(|package| package.id == "raner-v1")
+        .ok_or("catalog is missing raner-v1")?;
+    let ner_root = tempfile::tempdir().map_err(|error| format!("create NER temp root: {error}"))?;
+    let ner_installed = download_and_install(
+        &client,
+        ner_package,
+        ner_root.path(),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .await
+    .map_err(|error| format!("download and install RaNER: {error}"))?;
+    recognition::models::verify_model(&ner_installed)
+        .map_err(|error| format!("verify RaNER model: {error}"))?;
+    install_test_runtime(&ner_installed)?;
+    let mut ner =
+        Raner::load(&ner_installed).map_err(|error| format!("load RaNER model: {error}"))?;
+    let ner_entities = ner
+        .analyze("张三在北京工作，联系电话是13812345678。")
+        .map_err(|error| format!("run RaNER inference: {error}"))?;
+    for expected in ["PERSON", "LOCATION"] {
+        if !ner_entities
+            .iter()
+            .any(|entity| entity.entity_type == expected)
+        {
+            return Err(format!("RaNER inference did not detect {expected}").into());
+        }
+    }
+    eprintln!("inference checkpoint: RaNER inference completed");
     println!(
         "{}",
         serde_json::json!({
@@ -148,7 +182,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "first_resumed_progress": first_progress,
             "installed": true,
             "inference": true,
-            "detected_lines": lines.len()
+            "detected_lines": lines.len(),
+            "ner_inference": true,
+            "ner_entities": ner_entities.len()
         })
     );
     Ok(())

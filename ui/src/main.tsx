@@ -432,7 +432,10 @@ function App({
       listen<ModelProgressPayload>("model-progress", ({ payload }) => {
         if (payload && typeof payload.ready === "boolean")
           client.setQueryData(["model"], payload);
-        if (payload.message || payload.stage)
+        if (
+          payload.id !== "ppocrv4-accurate-v1" &&
+          (payload.message || payload.stage)
+        )
           setSetupProgress({
             id: payload.id,
             stage: payload.stage,
