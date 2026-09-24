@@ -7,6 +7,7 @@ license.workspace = true
 domain.workspace = true
 serde.workspace = true
 encoding_rs = "0.8"
+flate2 = "1"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 quick-xml = "0.38"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
@@ -15,5 +16,6 @@ ab_glyph = "0.2"
 zerocopy = "=0.8.56"
 mupdf = { git = "https://github.com/messense/mupdf-rs.git", rev = "537d50556ee8e4abf2435f81357dfef3c145d883", default-features = false, features = ["system-fonts"] }
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 uuid.workspace = true

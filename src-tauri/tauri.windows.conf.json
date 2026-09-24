@@ -7,7 +7,8 @@
       "nsis": {
         "displayLanguageSelector": false,
         "languages": ["SimpChinese"],
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "installer/hooks.nsh"
       }
     }
   }

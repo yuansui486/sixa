@@ -9,7 +9,7 @@ use std::{
     collections::VecDeque,
     path::Path,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -82,14 +82,14 @@ pub struct OcrLine {
 
 pub struct OcrRun {
     cancelled: Arc<AtomicBool>,
-    active: Arc<Mutex<Option<Arc<RunOptions>>>>,
+    active: Arc<Mutex<Vec<Weak<RunOptions>>>>,
 }
 
 impl OcrRun {
     pub fn new() -> Result<Self> {
         Ok(Self {
             cancelled: Arc::new(AtomicBool::new(false)),
-            active: Arc::new(Mutex::new(None)),
+            active: Arc::new(Mutex::new(Vec::new())),
         })
     }
     pub fn cancel(&self) -> Result<()> {
@@ -99,7 +99,7 @@ impl OcrRun {
             .lock()
             .map_err(|_| model_error("OCR 取消状态异常"))?
             .clone();
-        if let Some(options) = active {
+        for options in active.into_iter().filter_map(|entry| entry.upgrade()) {
             options.terminate().map_err(model_error)?;
         }
         Ok(())
@@ -111,32 +111,31 @@ impl OcrRun {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
-    fn begin(&self) -> Result<Arc<RunOptions>> {
+    pub(crate) fn begin(&self) -> Result<Arc<RunOptions>> {
         if self.is_cancelled() {
             return Err(Error::State("任务已取消".into()));
         }
         let options = Arc::new(RunOptions::new().map_err(model_error)?);
-        *self
-            .active
+        self.active
             .lock()
-            .map_err(|_| model_error("OCR 取消状态异常"))? = Some(options.clone());
+            .map_err(|_| model_error("OCR 取消状态异常"))?
+            .push(Arc::downgrade(&options));
         if self.is_cancelled() {
             options.terminate().map_err(model_error)?;
             return Err(Error::State("任务已取消".into()));
         }
         Ok(options)
     }
-    fn finish(&self, options: &Arc<RunOptions>) -> Result<()> {
+    pub(crate) fn finish(&self, options: &Arc<RunOptions>) -> Result<()> {
         let mut active = self
             .active
             .lock()
             .map_err(|_| model_error("OCR 取消状态异常"))?;
-        if active
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, options))
-        {
-            *active = None;
-        }
+        active.retain(|entry| {
+            entry
+                .upgrade()
+                .is_some_and(|current| !Arc::ptr_eq(&current, options))
+        });
         Ok(())
     }
 }
@@ -205,11 +204,14 @@ impl PpOcr {
     /// Runs every OCR graph once so a model is only reported ready after the
     /// runtime, model inputs, and model outputs have all been exercised.
     pub fn warm_up(&mut self) -> Result<()> {
+        self.warm_up_with_run(&OcrRun::new()?)
+    }
+
+    pub fn warm_up_with_run(&mut self, run: &OcrRun) -> Result<()> {
         let image = RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
-        let run = OcrRun::new()?;
-        self.detect(&image, &run)?;
-        self.classify_batch(std::slice::from_ref(&image), &run)?;
-        self.recognize_batch(std::slice::from_ref(&image), &run)?;
+        self.detect(&image, run)?;
+        self.classify_batch(std::slice::from_ref(&image), run)?;
+        self.recognize_batch(std::slice::from_ref(&image), run)?;
         Ok(())
     }
 

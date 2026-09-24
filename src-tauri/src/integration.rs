@@ -1,4 +1,6 @@
-use crate::{AppState, job, poisoned, register_run, unregister_run};
+use crate::{
+    AppState, batch_jobs, job, poisoned, register_run, runtime, scheduled_job, unregister_run, work,
+};
 use domain::{Error, Result, TaskOptions, TaskState};
 use integration_protocol::{
     CancelJobResult, CreateJobResult, DesensitizeBatchParams, DesensitizeFileParams, ErrorCode,
@@ -162,7 +164,17 @@ pub fn integration_info(state: State<'_, AppState>) -> IntegrationInfo {
         enabled: true,
         mcp_available: executable.is_file(),
         authenticated: state.auth.require_authenticated().is_ok(),
-        models_ready: state.model.lock().map(|model| model.ready).unwrap_or(false),
+        models_ready: state
+            .model
+            .lock()
+            .map(|model| {
+                model
+                    .capabilities
+                    .iter()
+                    .filter(|item| item.id != "ppocrv4-accurate-v1")
+                    .all(|item| item.installed)
+            })
+            .unwrap_or(false),
         executable_path: executable.display().to_string(),
         protocol_version: PROTOCOL_VERSION.to_string(),
         supported_formats: SUPPORTED_FORMATS.to_vec(),
@@ -455,7 +467,17 @@ async fn dispatch_method(
         Method::Status => {
             let state = app.state::<AppState>();
             let authenticated = state.auth.require_authenticated().is_ok();
-            let models_ready = state.model.lock().map(|model| model.ready).unwrap_or(false);
+            let models_ready = state
+                .model
+                .lock()
+                .map(|model| {
+                    model
+                        .capabilities
+                        .iter()
+                        .filter(|item| item.id != "ppocrv4-accurate-v1")
+                        .all(|item| item.installed)
+                })
+                .unwrap_or(false);
             to_value(StatusResult {
                 authenticated,
                 authorization_valid: authenticated,
@@ -527,12 +549,16 @@ fn enqueue_file(
     ensure_ready(&app)?;
     let id = Uuid::new_v4();
     let state = app.state::<AppState>();
+    let activity = state.desktop.admit().map_err(map_error)?;
     let run = register_run(&state, id).map_err(map_error)?;
     state
         .integration_jobs
         .insert(id, "file", run.clone())
         .map_err(map_error)?;
-    tauri::async_runtime::spawn(run_file(app, id, source, output_dir, run));
+    tauri::async_runtime::spawn(async move {
+        let _activity = activity;
+        run_file(app, id, source, output_dir, run).await;
+    });
     Ok(id)
 }
 
@@ -573,9 +599,23 @@ async fn run_file_inner(
     });
     let source_owned = source.to_path_buf();
     let analyze_run = run.clone();
-    let analyzed = job(state.clone(), move |engine| {
-        engine.analyze_file_as(&source_owned, TaskOptions::default(), id, analyze_run)
+    let options = work(state.clone(), |engine| {
+        let settings = engine.store.settings()?;
+        Ok(TaskOptions {
+            ocr_profile: settings.ocr_profile,
+            pdf_mode: settings.pdf_mode,
+        })
     })
+    .await
+    .map_err(map_error)?;
+    let requirements = runtime::Requirements::for_file(&source_owned, &options);
+    let analyzed = scheduled_job(
+        state.clone(),
+        Some(app.clone()),
+        requirements,
+        Some(run.clone()),
+        move |engine| engine.analyze_file_as(&source_owned, options, id, analyze_run),
+    )
     .await
     .map_err(map_error)?;
     state.integration_jobs.update(id, |snapshot| {
@@ -585,9 +625,13 @@ async fn run_file_inner(
         snapshot.result.progress_percent = 55;
     });
     let execute_run = run.clone();
-    let view = job(state.clone(), move |engine| {
-        engine.execute_as(id, execute_run)
-    })
+    let view = scheduled_job(
+        state.clone(),
+        Some(app.clone()),
+        runtime::Requirements::render(),
+        Some(run.clone()),
+        move |engine| engine.execute_as(id, execute_run),
+    )
     .await
     .map_err(map_error)?;
     state.integration_jobs.update(id, |snapshot| {
@@ -657,12 +701,16 @@ fn enqueue_batch(
     ensure_ready(&app)?;
     let id = Uuid::new_v4();
     let state = app.state::<AppState>();
+    let activity = state.desktop.admit().map_err(map_error)?;
     let run = register_run(&state, id).map_err(map_error)?;
     state
         .integration_jobs
         .insert(id, "batch", run.clone())
         .map_err(map_error)?;
-    tauri::async_runtime::spawn(run_batch(app, id, sources, output_dir, run));
+    tauri::async_runtime::spawn(async move {
+        let _activity = activity;
+        run_batch(app, id, sources, output_dir, run).await;
+    });
     Ok(id)
 }
 
@@ -702,21 +750,22 @@ async fn run_batch_inner(
         snapshot.result.progress_percent = 10;
     });
     let analyze_run = run.clone();
-    let _batch = job(state.clone(), move |engine| {
-        engine.create_batch_as(sources, id, analyze_run, |_, _| {})
-    })
-    .await
-    .map_err(map_error)?;
+    work(state.clone(), move |engine| engine.begin_batch(sources, id))
+        .await
+        .map_err(map_error)?;
+    let _batch = batch_jobs::analyze(state.clone(), app.clone(), id, analyze_run)
+        .await
+        .map_err(map_error)?;
+    ensure_not_cancelled(&run)?;
     state.integration_jobs.update(id, |snapshot| {
         snapshot.result.state = JobState::Generating;
         snapshot.result.progress_percent = 55;
     });
     let execute_run = run.clone();
-    let batch = job(state.clone(), move |engine| {
-        engine.execute_batch_as(id, execute_run, |_, _| {})
-    })
-    .await
-    .map_err(map_error)?;
+    let batch = batch_jobs::execute(state.clone(), app.clone(), id, execute_run)
+        .await
+        .map_err(map_error)?;
+    ensure_not_cancelled(&run)?;
     let batch_state = batch.meta.state;
     let counts = job(state.clone(), move |engine| {
         let mut counts = BTreeMap::new();
@@ -791,7 +840,10 @@ fn ensure_ready(app: &AppHandle) -> std::result::Result<(), IntegrationError> {
         .model
         .lock()
         .map_err(|_| IntegrationError::new(ErrorCode::TaskFailed, "模型状态不可用"))?
-        .ready
+        .capabilities
+        .iter()
+        .find(|item| item.id == "raner-v1")
+        .is_some_and(|item| item.installed)
     {
         return Err(IntegrationError::new(
             ErrorCode::ModelsNotReady,

@@ -30,7 +30,10 @@
     "licenseFile": "../LICENSE",
     "resources": {
       "../LICENSE": "LICENSE.txt",
-      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../crates/formats/assets/fonts/OFL.txt": "licenses/NotoSansSC-OFL.txt",
+      "../licenses/docx-preview-LICENSE.txt": "licenses/docx-preview-LICENSE.txt",
+      "../licenses/jszip-LICENSE.txt": "licenses/jszip-LICENSE.txt"
     },
     "shortDescription": "私匣 · 本机离线中文数据脱敏",
     "icon": [

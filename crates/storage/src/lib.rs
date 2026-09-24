@@ -6,7 +6,25 @@ use std::time::Duration;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct TaskQuery {
+    #[serde(default)]
+    pub search: String,
+    pub state: Option<String>,
+    pub from: Option<u64>,
+    pub to: Option<u64>,
+    #[serde(default)]
+    pub offset: u32,
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct TaskPage {
+    pub items: Vec<TaskMeta>,
+    pub total: u64,
+}
 
 pub struct Store {
     db: Connection,
@@ -21,6 +39,13 @@ fn json_err(e: serde_json::Error) -> Error {
 }
 impl Store {
     pub fn open(root: &Path, key: Zeroizing<[u8; 32]>) -> Result<Self> {
+        let store = Self::connect(root, key)?;
+        store.recover_interrupted()?;
+        Ok(store)
+    }
+
+    /// Open another connection without treating live workers as interrupted.
+    pub fn connect(root: &Path, key: Zeroizing<[u8; 32]>) -> Result<Self> {
         for p in ["db", "tasks", "models", "cache", "logs"] {
             std::fs::create_dir_all(root.join(p))?;
         }
@@ -31,12 +56,32 @@ impl Store {
         )
         .map_err(db_err)?;
         migrate_database(&mut db)?;
-        let store = Self {
+        Ok(Self {
             db,
             root: root.into(),
             key,
+        })
+    }
+
+    pub fn recover_interrupted(&self) -> Result<()> {
+        let records = {
+            let mut statement = self.db.prepare("SELECT id, metadata FROM tasks WHERE state IN ('queued','analyzing','processing')").map_err(db_err)?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(db_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_err)?
         };
-        for mut meta in store.tasks()? {
+        for (id, metadata) in records {
+            let mut meta = match parse_task_record(&id, &metadata) {
+                Ok(meta) => meta,
+                Err(error) => {
+                    self.quarantine_task(&id, &metadata, &error)?;
+                    continue;
+                }
+            };
             if matches!(
                 meta.state,
                 domain::TaskState::Queued
@@ -44,25 +89,85 @@ impl Store {
                     | domain::TaskState::Processing
             ) {
                 meta.state = domain::TaskState::Failed;
-                meta.error = Some("上次运行意外中断，请重新创建任务".into());
+                meta.error = Some("上次运行意外中断，可在任务历史中重试".into());
                 meta.error_info = Some(ErrorInfo::new(
                     "INTERRUPTED",
                     "任务意外中断",
                     "应用上次退出时任务仍在运行",
-                    "请从原文件重新创建任务",
+                    "请在任务历史中重试；若原件未保存，请重新选择文件",
                     true,
                 ));
-                store.save_meta(&meta)?;
+                self.save_meta(&meta)?;
             }
         }
-        Ok(store)
+        Ok(())
     }
     pub fn task_dir(&self, id: Uuid) -> PathBuf {
         self.root.join("tasks").join(id.to_string())
     }
     pub fn save_meta(&self, meta: &TaskMeta) -> Result<()> {
-        self.db.execute("INSERT INTO tasks VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata", params![meta.id.to_string(),serde_json::to_string(meta).map_err(json_err)?]).map_err(db_err)?;
+        self.db.execute("INSERT INTO tasks(id,metadata) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata", params![meta.id.to_string(),serde_json::to_string(meta).map_err(json_err)?]).map_err(db_err)?;
         Ok(())
+    }
+
+    pub fn task_page(&self, query: TaskQuery) -> Result<TaskPage> {
+        if query.from.zip(query.to).is_some_and(|(from, to)| from > to) {
+            return Err(Error::Invalid("开始日期不能晚于结束日期".into()));
+        }
+        let state = query.state.filter(|state| !state.is_empty());
+        if state.as_deref().is_some_and(|s| {
+            !matches!(
+                s,
+                "queued"
+                    | "analyzing"
+                    | "awaiting_review"
+                    | "processing"
+                    | "completed"
+                    | "partial"
+                    | "failed"
+                    | "cancelled"
+            )
+        }) {
+            return Err(Error::Invalid("未知任务状态".into()));
+        }
+        let search = query.search.trim();
+        let predicate = "parent_batch_id IS NULL AND (?1='' OR instr(lower(display_name),lower(?1))>0) AND (?2 IS NULL OR state=?2) AND (?3 IS NULL OR created_at>=?3) AND (?4 IS NULL OR created_at<=?4)";
+        let from = query.from.map(|v| v.min(i64::MAX as u64) as i64);
+        let to = query.to.map(|v| v.min(i64::MAX as u64) as i64);
+        let total = self
+            .db
+            .query_row(
+                &format!("SELECT count(*) FROM tasks WHERE {predicate}"),
+                params![search, state, from, to],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(db_err)? as u64;
+        let mut stmt = self.db.prepare(&format!("SELECT id,metadata FROM tasks WHERE {predicate} ORDER BY created_at DESC,id DESC LIMIT ?5 OFFSET ?6")).map_err(db_err)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    search,
+                    state,
+                    from,
+                    to,
+                    query.limit.unwrap_or(50).clamp(1, 100),
+                    query.offset
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(db_err)?;
+        let records = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        drop(stmt);
+        let mut items = Vec::with_capacity(records.len());
+        for (id, metadata) in records {
+            match parse_task_record(&id, &metadata) {
+                Ok(meta) => items.push(meta),
+                Err(error) => self.quarantine_task(&id, &metadata, &error)?,
+            }
+        }
+        Ok(TaskPage { items, total })
     }
     pub fn task(&self, id: Uuid) -> Result<Option<TaskMeta>> {
         let row = self
@@ -252,6 +357,16 @@ impl Store {
     pub fn save_policy(&self, p: &Policy) -> Result<()> {
         self.put("policy", &p.entity_type, p)
     }
+    pub fn desktop_preferences(&self) -> Result<domain::DesktopPreferences> {
+        Ok(self
+            .config("desktop_preferences")?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
+    }
+    pub fn save_desktop_preferences(&self, preferences: &domain::DesktopPreferences) -> Result<()> {
+        self.put("desktop_preferences", "app", preferences)
+    }
     pub fn settings(&self) -> Result<AppSettings> {
         Ok(self
             .config::<AppSettings>("settings")?
@@ -313,6 +428,15 @@ fn migrate_database(db: &mut Connection) -> Result<()> {
                      );",
                 )
                 .map_err(db_err)?,
+            2 => transaction.execute_batch(
+                "ALTER TABLE tasks ADD COLUMN state TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.state') END) VIRTUAL;
+                 ALTER TABLE tasks ADD COLUMN created_at INTEGER GENERATED ALWAYS AS (CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.created_at') END) VIRTUAL;
+                 ALTER TABLE tasks ADD COLUMN display_name TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(metadata) THEN coalesce(json_extract(metadata,'$.display_name'),'') END) VIRTUAL;
+                 ALTER TABLE tasks ADD COLUMN parent_batch_id TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.parent_batch_id') END) VIRTUAL;
+                 CREATE INDEX tasks_history_order ON tasks(parent_batch_id,created_at DESC,id DESC);
+                 CREATE INDEX tasks_history_state ON tasks(parent_batch_id,state,created_at DESC,id DESC);
+                 CREATE INDEX tasks_active_state ON tasks(state);"
+            ).map_err(db_err)?,
             _ => return Err(Error::Invalid(format!("没有数据库版本 {current} 的迁移"))),
         }
         current += 1;
@@ -402,6 +526,121 @@ pub fn credential_key() -> Result<Zeroizing<[u8; 32]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_preferences_are_local_and_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = Zeroizing::new([44; 32]);
+        let store = Store::open(directory.path(), key.clone()).unwrap();
+        assert_eq!(
+            store.desktop_preferences().unwrap(),
+            domain::DesktopPreferences::default()
+        );
+        let preferences = domain::DesktopPreferences {
+            close_behavior: domain::CloseBehavior::Tray,
+        };
+        store.save_desktop_preferences(&preferences).unwrap();
+        assert_eq!(
+            store.settings().unwrap().concurrency,
+            AppSettings::default().concurrency
+        );
+        drop(store);
+        let store = Store::open(directory.path(), key).unwrap();
+        assert_eq!(store.desktop_preferences().unwrap(), preferences);
+        assert!(
+            serde_json::from_str::<domain::DesktopPreferences>(r#"{"close_behavior":"unknown"}"#)
+                .is_err()
+        );
+    }
+    fn sample_meta(index: u64) -> TaskMeta {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(), "kind":"txt", "state":"completed",
+            "created_at":index,"updated_at":index,"error":null,
+            "display_name":format!("合同 {index}.txt")
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn opening_worker_connection_does_not_fail_live_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), Zeroizing::new([23; 32])).unwrap();
+        let mut meta = sample_meta(1);
+        meta.state = domain::TaskState::Analyzing;
+        store.save_meta(&meta).unwrap();
+        let worker = Store::connect(dir.path(), Zeroizing::new([23; 32])).unwrap();
+        assert_eq!(
+            worker.task(meta.id).unwrap().unwrap().state,
+            domain::TaskState::Analyzing
+        );
+        drop(worker);
+        drop(store);
+        let restarted = Store::open(dir.path(), Zeroizing::new([23; 32])).unwrap();
+        assert_eq!(
+            restarted.task(meta.id).unwrap().unwrap().state,
+            domain::TaskState::Failed
+        );
+    }
+
+    #[test]
+    fn history_filters_and_paginates_without_batch_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), Zeroizing::new([24; 32])).unwrap();
+        for index in 0..125 {
+            store.save_meta(&sample_meta(index)).unwrap();
+        }
+        let mut child = sample_meta(500);
+        child.parent_batch_id = Some(Uuid::new_v4());
+        store.save_meta(&child).unwrap();
+        let first = store.task_page(TaskQuery::default()).unwrap();
+        assert_eq!(first.total, 125);
+        assert_eq!(first.items.len(), 50);
+        assert_eq!(first.items[0].created_at, 124);
+        let second = store
+            .task_page(TaskQuery {
+                offset: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(second.items[0].created_at, 74);
+        let filtered = store
+            .task_page(TaskQuery {
+                search: "合同 12".into(),
+                state: Some("completed".into()),
+                from: Some(120),
+                to: Some(123),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(filtered.total, 4);
+        assert_eq!(filtered.items[0].created_at, 123);
+    }
+
+    #[test]
+    fn version_two_database_migrates_without_losing_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("db")).unwrap();
+        let db = Connection::open(dir.path().join("db/app.sqlite3")).unwrap();
+        db.execute_batch("CREATE TABLE tasks(id TEXT PRIMARY KEY, metadata TEXT NOT NULL); CREATE TABLE config(kind TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(kind,id)); CREATE TABLE corrupt_tasks(id TEXT PRIMARY KEY,metadata TEXT NOT NULL,error TEXT NOT NULL,quarantined_at INTEGER NOT NULL); PRAGMA user_version=2;").unwrap();
+        let task = sample_meta(1);
+        db.execute(
+            "INSERT INTO tasks VALUES(?1,?2)",
+            params![task.id.to_string(), serde_json::to_string(&task).unwrap()],
+        )
+        .unwrap();
+        drop(db);
+        let store = Store::open(dir.path(), Zeroizing::new([25; 32])).unwrap();
+        assert_eq!(
+            store.task_page(TaskQuery::default()).unwrap().items[0].id,
+            task.id
+        );
+        assert_eq!(
+            store
+                .db
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+    }
     #[test]
     fn custom_rule_creates_policy_without_overwriting_builtin_or_user_policy() {
         let dir = tempfile::tempdir().unwrap();

@@ -119,7 +119,7 @@ impl Raner {
             crf,
         })
     }
-    fn window(&mut self, text: &str, base: usize) -> Result<Vec<Entity>> {
+    fn window(&mut self, text: &str, base: usize, run: &crate::ocr::OcrRun) -> Result<Vec<Entity>> {
         // RaNER's tokenizer_config.json specifies is_split_into_words=true.
         // ModelScope tokenizes each Unicode scalar independently, keeping the
         // first subtoken for CRF and substituting UNK for whitespace.
@@ -146,7 +146,10 @@ impl Raner {
         }
         let attention = vec![1i64; len];
         let types = vec![0i64; len];
-        let outputs=self.session.run(ort::inputs!["input_ids"=>Tensor::from_array(([1,len],ids)).map_err(err)?,"attention_mask"=>Tensor::from_array(([1,len],attention)).map_err(err)?,"token_type_ids"=>Tensor::from_array(([1,len],types)).map_err(err)?]).map_err(err)?;
+        let options = run.begin()?;
+        let outputs = self.session.run_with_options(ort::inputs!["input_ids"=>Tensor::from_array(([1,len],ids)).map_err(err)?,"attention_mask"=>Tensor::from_array(([1,len],attention)).map_err(err)?,"token_type_ids"=>Tensor::from_array(([1,len],types)).map_err(err)?], &options).map_err(err);
+        run.finish(&options)?;
+        let outputs = outputs?;
         let (shape, logits) = outputs["emissions"]
             .try_extract_tensor::<f32>()
             .map_err(err)?;
@@ -212,14 +215,20 @@ impl Raner {
 }
 impl Ner for Raner {
     fn analyze(&mut self, text: &str) -> Result<Vec<Entity>> {
+        self.analyze_with_run(text, &crate::ocr::OcrRun::new()?)
+    }
+    fn analyze_with_run(&mut self, text: &str, run: &crate::ocr::OcrRun) -> Result<Vec<Entity>> {
         let mut boundaries: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
         boundaries.push(text.len());
         let mut results = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for start in (0..boundaries.len() - 1).step_by(400) {
+            if run.is_cancelled() {
+                return Err(domain::Error::State("任务已取消".into()));
+            }
             let end = (start + 450).min(boundaries.len() - 1);
             let base = boundaries[start];
-            for e in self.window(&text[base..boundaries[end]], base)? {
+            for e in self.window(&text[base..boundaries[end]], base, run)? {
                 if seen.insert((e.entity_type.clone(), e.span.start, e.span.end)) {
                     results.push(e);
                 }

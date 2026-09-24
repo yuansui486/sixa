@@ -8,6 +8,12 @@ use uuid::Uuid;
 
 pub trait Ner: Send {
     fn analyze(&mut self, text: &str) -> Result<Vec<Entity>>;
+    fn analyze_with_run(&mut self, text: &str, run: &ocr::OcrRun) -> Result<Vec<Entity>> {
+        if run.is_cancelled() {
+            return Err(Error::State("任务已取消".into()));
+        }
+        self.analyze(text)
+    }
 }
 pub fn entity(result: RecognizerResult, source: &str) -> Entity {
     Entity {
@@ -62,11 +68,19 @@ pub fn compile_rule(rule: &Rule) -> Result<Vec<Regex>> {
         .collect()
 }
 pub fn analyze(text: &str, rules: &[Rule], ner: &mut dyn Ner) -> Result<Vec<Entity>> {
+    analyze_with_run(text, rules, ner, &ocr::OcrRun::new()?)
+}
+pub fn analyze_with_run(
+    text: &str,
+    rules: &[Rule],
+    ner: &mut dyn Ner,
+    run: &ocr::OcrRun,
+) -> Result<Vec<Entity>> {
     if text.is_empty() || text.len() > 8 * 1024 * 1024 {
         return Err(Error::Invalid("文本不能为空或超过 8 MB".into()));
     }
     // Required inference happens before any rule work; failures never become regex-only success.
-    let mut results = ner.analyze(text)?;
+    let mut results = ner.analyze_with_run(text, run)?;
     for (typ, pattern, score) in [
         ("PHONE", r"1[3-9][0-9]{9}", 0.95),
         (
@@ -101,6 +115,9 @@ pub fn analyze(text: &str, rules: &[Rule], ner: &mut dyn Ner) -> Result<Vec<Enti
         }
     }
     for rule in rules.iter().filter(|r| r.enabled) {
+        if run.is_cancelled() {
+            return Err(Error::State("任务已取消".into()));
+        }
         for regex in compile_rule(rule)? {
             for m in regex.find_iter(text) {
                 if results.len() >= 100_000 {
@@ -134,6 +151,23 @@ mod tests {
     #[test]
     fn cannot_fall_back_to_rules() {
         assert!(analyze("13812345678", &[], &mut Failed).is_err());
+    }
+    #[test]
+    fn cancellation_prevents_inference_and_rule_only_results() {
+        struct Never;
+        impl Ner for Never {
+            fn analyze(&mut self, _: &str) -> Result<Vec<Entity>> {
+                panic!("cancelled work must not run inference")
+            }
+        }
+        let run = ocr::OcrRun::new().unwrap();
+        let child = run.clone();
+        run.cancel().unwrap();
+        assert!(child.is_cancelled());
+        assert!(matches!(
+            analyze_with_run("电话13812345678", &[], &mut Never, &child),
+            Err(Error::State(_))
+        ));
     }
     #[test]
     fn unsafe_regex_rejected() {

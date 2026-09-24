@@ -3,6 +3,21 @@ use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseBehavior {
+    #[default]
+    Ask,
+    Tray,
+    Exit,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DesktopPreferences {
+    pub close_behavior: CloseBehavior,
+}
+
 #[derive(Debug, thiserror::Error, Serialize)]
 #[serde(tag = "code", content = "message", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Error {
@@ -101,6 +116,8 @@ pub struct EntityDto {
     pub display: Span,
     pub text: String,
     pub replacement: Option<String>,
+    #[serde(default)]
+    pub effective_replacement: String,
 }
 impl Entity {
     pub fn dto(&self, text: &str) -> Result<EntityDto> {
@@ -115,6 +132,7 @@ impl Entity {
             display,
             text: text[self.span.start..self.span.end].into(),
             replacement: self.replacement.clone(),
+            effective_replacement: replacement(self, &text[self.span.start..self.span.end], &[]),
         })
     }
 }
@@ -242,9 +260,46 @@ pub struct PageDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewDto {
+    #[serde(default)]
+    pub kind: PreviewKind,
     pub revision: u64,
     pub pages: Vec<PageDto>,
     pub text: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewKind {
+    Pages,
+    Docx,
+    OfficeContent,
+    #[default]
+    Text,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfficeAnchor {
+    pub id: String,
+    pub text: String,
+    pub display: Span,
+    pub label: String,
+    pub available_in_layout: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfficeImage {
+    pub index: u32,
+    pub name: String,
+    /// Bookmark names immediately before each drawing occurrence.
+    pub occurrences: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfficePreview {
+    pub revision: u64,
+    pub layout_available: bool,
+    pub reason: Option<String>,
+    pub anchors: Vec<OfficeAnchor>,
+    pub images: Vec<OfficeImage>,
     pub warnings: Vec<String>,
 }
 
@@ -257,7 +312,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            concurrency: 2,
+            concurrency: 1,
             ocr_profile: OcrProfile::Mobile,
             pdf_mode: PdfMode::SafeRebuild,
         }

@@ -1,88 +1,152 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { listen } from "@tauri-apps/api/event";
+import { LoaderCircle, Square, FileText } from "lucide-react";
 import {
-  ArrowLeft,
-  ArrowRight,
-  CheckCircle2,
-  FileText,
-  Square,
-} from "lucide-react";
-import { call, formatBytes, message, stateLabels } from "./api";
+  call,
+  formatBytes,
+  message,
+  stateLabels,
+  capabilityInstalled,
+  type BatchView,
+} from "./api";
 import { useWorkbench } from "./store";
+import { flushReview } from "./review";
+import { useJobs, runningJob } from "./jobs";
+import { rememberDirectory } from "./preferences";
 
 export function Batch() {
   const [params, setParams] = useSearchParams();
   const id = params.get("id");
-  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  const [progress, setProgress] = useState("");
-  const [notice, setNotice] = useState("");
-  const [pendingId, setPendingId] = useState<string | null>(null);
-  const [onlyPending, setOnlyPending] = useState(false);
+  const [savedPath, setSavedPath] = useState("");
+  const [filter, setFilter] = useState("all");
   const navigate = useNavigate();
+  const client = useQueryClient();
+  const job = useJobs((s) => (id ? s.jobs[id] : undefined));
+  const active = runningJob(job);
+  const busy = pending || active;
   const task = useQuery({
     queryKey: ["batch", id],
     queryFn: () => call("batch_view", { id: id! }),
     enabled: !!id,
+    refetchInterval: (query) =>
+      active ||
+      ["queued", "analyzing", "processing"].includes(
+        query.state.data?.meta.state ?? "",
+      )
+        ? 1500
+        : false,
   });
   const model = useQuery({
     queryKey: ["model"],
     queryFn: () => call("model_status"),
   });
   const items = task.data?.items ?? [];
-  const reviewable = items.filter((item) => !!item.task_id);
-  const reviewed = reviewable.filter(
-    (item) => (item.reviewed_revision ?? 0) > 0,
+  const checkable = items.filter(
+    (item) =>
+      item.task_id && ["awaiting_review", "completed"].includes(item.state),
   );
-  const visibleItems = onlyPending
-    ? items.filter((item) => !!item.task_id && !(item.reviewed_revision ?? 0))
-    : items;
+  const checked = (item: BatchView["items"][number]) =>
+    item.review_confirmed ??
+    ((item.reviewed_revision ?? 0) > 0 &&
+      (item.revision === undefined ||
+        item.reviewed_revision === item.revision));
+  const unreviewed = checkable.filter(
+    (item) => item.state === "awaiting_review" && !checked(item),
+  );
+  const completed = items.filter((item) => item.state === "completed").length;
+  const failed = items.filter((item) => item.state === "failed").length;
+  const visibleItems = items.filter(
+    (item) =>
+      filter === "all" ||
+      (filter === "pending"
+        ? unreviewed.includes(item)
+        : item.state === filter),
+  );
   async function run(fn: () => Promise<void>) {
-    setBusy(true);
+    setPending(true);
     setError("");
-    setNotice("");
-    let unlisten: (() => void) | undefined;
     try {
-      unlisten = await listen<{ done: number; total: number }>(
-        "batch-progress",
-        (event) =>
-          setProgress(`${event.payload.done} / ${event.payload.total}`),
-      );
       await fn();
     } catch (error) {
       setError(message(error));
     } finally {
-      unlisten?.();
-      setBusy(false);
-      setProgress("");
-      setPendingId(null);
+      setPending(false);
+      void client.invalidateQueries({ queryKey: ["batch"] });
+      void client.invalidateQueries({ queryKey: ["tasks"] });
+    }
+  }
+  async function operate(
+    command: "execute_batch" | "retry_batch",
+    failedOnly = false,
+  ) {
+    if (!id) return;
+    const operationId = command === "retry_batch" ? crypto.randomUUID() : id;
+    if (operationId !== id) setParams({ id: operationId });
+    useJobs
+      .getState()
+      .update({
+        id: operationId,
+        stage: "queued",
+        batch: true,
+        terminal: false,
+      });
+    try {
+      const result =
+        command === "execute_batch"
+          ? await call(command, { id })
+          : await call(command, { id, failedOnly, requestId: operationId });
+      client.setQueryData(["batch", result.meta.id], result);
+      if (
+        result.meta.id !== operationId &&
+        window.location.hash === `#/batch?id=${operationId}`
+      )
+        setParams({ id: result.meta.id });
+    } finally {
+      useJobs.getState().update({ id: operationId, terminal: true });
     }
   }
   return (
     <>
       <header>
         <h1>批量处理</h1>
-        <p>选择文件，逐项复核，再统一生成和导出。失败项会保留在报告中。</p>
+        <p>逐份检查后统一生成，已完成的文件可以随时保存。</p>
       </header>
-      {(error || task.error) && (
+      {(error || (task.error && !active)) && (
         <p role="alert" className="error">
           {error || message(task.error)}
         </p>
       )}
-      {notice && (
-        <p role="status" className="notice">
-          {notice}
+      {savedPath && (
+        <p className="export-notice" role="status">
+          文件已保存
+          <button
+            className="text-action"
+            onClick={() =>
+              void run(async () => {
+                await call("reveal_file", { path: savedPath });
+              })
+            }
+          >
+            打开所在文件夹
+          </button>
         </p>
       )}
       <section className="card">
         <div className="toolbar">
           <button
-            disabled={busy || !model.data?.ready}
+            disabled={busy || !capabilityInstalled(model.data, "raner-v1")}
+            title={
+              !capabilityInstalled(model.data, "raner-v1")
+                ? "中文识别模型正在准备，请查看模型管理"
+                : undefined
+            }
             onClick={() =>
-              run(async () => {
+              void run(async () => {
+                await flushReview();
                 const paths = await open({
                   multiple: true,
                   filters: [
@@ -106,104 +170,178 @@ export function Batch() {
                   ],
                 });
                 if (!Array.isArray(paths) || !paths.length) return;
+                if (paths.length > 20)
+                  throw Error("每批最多 20 个文件，请减少选择后重试");
+                const settings = await call("get_settings");
+                const ocrId =
+                  settings.ocr_profile === "accurate"
+                    ? "ppocrv4-accurate-v1"
+                    : "ppocrv4-mobile-v1";
+                if (
+                  paths.some((path) =>
+                    /\.(png|jpe?g|bmp|tiff?|pdf)$/i.test(path),
+                  ) &&
+                  !model.data?.capabilities?.some(
+                    (capability) =>
+                      capability.id === ocrId && capability.installed,
+                  )
+                )
+                  throw Error(
+                    "本批包含图片或 PDF，尚未安装所选图片识别模型，请在模型管理中完成安装",
+                  );
                 const requestId = crypto.randomUUID();
-                setPendingId(requestId);
-                const batch = await call("create_batch", { paths, requestId });
-                setParams({ id: batch.meta.id });
+                useJobs.getState().update({
+                  id: requestId,
+                  stage: "queued",
+                  total: paths.length,
+                  done: 0,
+                  terminal: false,
+                  batch: true,
+                });
+                setParams({ id: requestId });
+                try {
+                  const batch = await call("create_batch", {
+                    paths,
+                    requestId,
+                  });
+                  client.setQueryData(["batch", requestId], batch);
+                } finally {
+                  useJobs.getState().update({ id: requestId, terminal: true });
+                }
               })
             }
           >
             选择多个文件
           </button>
-          <span>最多 20 个文件，总大小不超过 500 MB</span>
-          {busy && <span role="status">正在处理 {progress}</span>}
-          {busy && pendingId && (
-            <button
-              className="secondary"
-              title="取消当前批次"
-              onClick={() => void call("cancel_task", { id: pendingId })}
-            >
-              <Square size={16} />
-              取消批次
+          <span className="muted">最多 20 份 · 共 500 MB</span>
+          {!capabilityInstalled(model.data, "raner-v1") && (
+            <button className="text-action" onClick={() => navigate("/models")}>
+              查看模型准备进度
             </button>
           )}
-        </div>
-        {!id && (
-          <p className="empty">批次会保存在任务历史中，可以稍后继续复核。</p>
-        )}
-        {task.data && (
-          <>
-            <div className="batch-summary" aria-live="polite">
-              <div>
-                <strong>{items.length}</strong>
-                <span>文件总数</span>
-              </div>
-              <div>
-                <strong>{reviewed.length}</strong>
-                <span>已复核</span>
-              </div>
-              <div>
-                <strong>{reviewable.length - reviewed.length}</strong>
-                <span>待复核</span>
-              </div>
-              <div>
-                <strong>
-                  {items.filter((item) => item.state === "failed").length}
-                </strong>
-                <span>失败</span>
-              </div>
-            </div>
-            <div className="toolbar">
-              <span className="badge">{stateLabels[task.data.meta.state]}</span>
+          {busy && (
+            <span role="status" className="inline-progress">
+              <LoaderCircle size={16} className="spin" />
+              {job?.stage === "queued"
+                ? "等待处理"
+                : job?.stage === "processing"
+                  ? "正在生成"
+                  : "正在分析"}
+              {typeof job?.done === "number" &&
+              typeof job.total === "number" &&
+              job.total > 0
+                ? ` · ${job.done} / ${job.total} 份`
+                : ""}
+            </span>
+          )}
+          {(active ||
+            ["queued", "analyzing", "processing"].includes(
+              task.data?.meta.state ?? "",
+            )) &&
+            id && (
               <button
-                disabled={busy || task.data.meta.state !== "awaiting_review"}
+                className="secondary"
                 onClick={() =>
-                  run(async () => {
-                    const pending = reviewable.length - reviewed.length;
-                    if (
-                      pending > 0 &&
-                      !window.confirm(
-                        `还有 ${pending} 个文件未手工复核，将使用自动识别结果继续生成。确定继续吗？`,
-                      )
-                    )
-                      return;
-                    setPendingId(id!);
-                    await call("execute_batch", { id: id! });
-                    await task.refetch();
+                  void run(async () => {
+                    await call("cancel_task", { id });
                   })
                 }
               >
-                按已保存的复核结果生成
+                <Square size={15} />
+                取消剩余任务
               </button>
+            )}
+        </div>
+        {!id && (
+          <p className="empty">选择文件后开始识别。批次会保存在任务历史中。</p>
+        )}
+        {id && !task.data && active && (
+          <p className="empty" role="status">
+            正在建立文件清单，可以离开此页，任务会继续处理。
+          </p>
+        )}
+        {task.data && (
+          <>
+            <div className="batch-overview">
+              <strong>{stateLabels[task.data.meta.state]}</strong>
+              <span>{items.length} 份文件</span>
+              <span>待检查 {unreviewed.length}</span>
+              <span>已完成 {completed}</span>
+              {failed > 0 && <span>失败 {failed}</span>}
+            </div>
+            <div className="toolbar">
+              {task.data.meta.state === "awaiting_review" && (
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    void run(async () => {
+                      if (
+                        unreviewed.length &&
+                        !window.confirm(
+                          `还有 ${unreviewed.length} 份文件未确认检查，将按当前识别结果生成。继续吗？`,
+                        )
+                      )
+                        return;
+                      await operate("execute_batch");
+                    })
+                  }
+                >
+                  生成脱敏文件
+                </button>
+              )}
+              {["failed", "cancelled", "partial"].includes(
+                task.data.meta.state,
+              ) && (
+                <button
+                  className="secondary"
+                  disabled={busy}
+                  onClick={() => void run(() => operate("retry_batch", false))}
+                >
+                  继续未完成文件
+                </button>
+              )}
+              {failed > 0 && (
+                <button
+                  className="secondary"
+                  disabled={busy}
+                  onClick={() => void run(() => operate("retry_batch", true))}
+                >
+                  重试失败项
+                </button>
+              )}
               <button
-                disabled={
-                  busy ||
-                  !["completed", "partial"].includes(task.data.meta.state)
-                }
+                className="secondary"
+                disabled={busy || !completed}
+                title={!completed ? "生成成功后可以导出" : undefined}
                 onClick={() =>
-                  run(async () => {
+                  void run(async () => {
                     const path = await save({
                       defaultPath: "批量脱敏结果.zip",
                     });
                     if (path) {
                       await call("export_batch", { id: id!, path });
-                      setNotice("已导出 ZIP 和报告");
+                      rememberDirectory(path);
+                      setSavedPath(path);
                     }
                   })
                 }
               >
-                导出 ZIP 和报告
+                导出
+                {completed && completed < items.length
+                  ? `已完成的 ${completed} 份`
+                  : "ZIP 和报告"}
               </button>
-              <label className="filter-toggle">
-                <input
-                  type="checkbox"
-                  checked={onlyPending}
-                  onChange={(event) => setOnlyPending(event.target.checked)}
-                />
-                只看未复核
-              </label>
+              <select
+                aria-label="筛选批次文件"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              >
+                <option value="all">全部文件</option>
+                <option value="pending">待检查</option>
+                <option value="failed">失败</option>
+                <option value="completed">已完成</option>
+              </select>
             </div>
-            <p>每项复核结果会自动保存。生成前会再次提醒尚未复核的文件。</p>
             <div className="table-scroll">
               <table>
                 <thead>
@@ -215,7 +353,7 @@ export function Batch() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleItems.map((item, visibleIndex) => (
+                  {visibleItems.map((item) => (
                     <tr key={item.index}>
                       <td>
                         <span className="file-cell">
@@ -223,7 +361,7 @@ export function Batch() {
                           <span>
                             <strong>
                               {item.display_name ||
-                                `第 ${item.index + 1} 个文件`}
+                                `第 ${item.index + 1} 份文件`}
                             </strong>
                             <small>
                               {(item.extension || "文件").toUpperCase()} ·{" "}
@@ -234,97 +372,59 @@ export function Batch() {
                       </td>
                       <td>
                         {stateLabels[item.state]}
-                        {(item.reviewed_revision ?? 0) > 0 && (
-                          <span className="reviewed">
-                            <CheckCircle2 size={14} />
-                            已复核
-                          </span>
-                        )}
+                        {checked(item) && <small>已确认检查</small>}
                       </td>
                       <td>
                         {item.error_info ? (
-                          <>
-                            <strong>{item.error_info.title}</strong>
-                            <small>{item.error_info.recovery_action}</small>
-                          </>
+                          <details>
+                            <summary>{item.error_info.title}</summary>
+                            <p>{item.error_info.recovery_action}</p>
+                          </details>
                         ) : (
                           item.error || "—"
                         )}
                       </td>
                       <td>
-                        <div className="row-actions">
-                          <button
-                            className="icon-button secondary"
-                            aria-label="上一个文件"
-                            title="上一个文件"
-                            disabled={visibleIndex === 0}
-                            onClick={() =>
-                              document
-                                .getElementById(
-                                  `batch-${visibleItems[visibleIndex - 1]?.index}`,
-                                )
-                                ?.scrollIntoView({
-                                  behavior: "smooth",
-                                  block: "center",
-                                })
-                            }
-                          >
-                            <ArrowLeft size={16} />
-                          </button>
-                          <button
-                            className="secondary"
-                            id={`batch-${item.index}`}
-                            disabled={
-                              busy ||
-                              !item.task_id ||
-                              !["awaiting_review", "completed"].includes(
-                                item.state,
-                              )
-                            }
-                            onClick={() =>
-                              run(async () => {
-                                const store = useWorkbench.getState();
-                                store.setTask(
-                                  await call("task_view", {
-                                    id: item.task_id!,
-                                  }),
-                                );
-                                store.setBatchId(id);
-                                navigate("/");
-                              })
-                            }
-                          >
-                            {(item.reviewed_revision ?? 0) > 0
-                              ? "再次复核"
-                              : "打开复核"}
-                          </button>
-                          <button
-                            className="icon-button secondary"
-                            aria-label="下一个文件"
-                            title="下一个文件"
-                            disabled={visibleIndex === visibleItems.length - 1}
-                            onClick={() =>
-                              document
-                                .getElementById(
-                                  `batch-${visibleItems[visibleIndex + 1]?.index}`,
-                                )
-                                ?.scrollIntoView({
-                                  behavior: "smooth",
-                                  block: "center",
-                                })
-                            }
-                          >
-                            <ArrowRight size={16} />
-                          </button>
-                        </div>
+                        <button
+                          className="secondary"
+                          disabled={
+                            pending ||
+                            !item.task_id ||
+                            !["awaiting_review", "completed"].includes(
+                              item.state,
+                            )
+                          }
+                          title={
+                            item.state === "failed"
+                              ? "此文件需要重新分析"
+                              : undefined
+                          }
+                          onClick={() =>
+                            void run(async () => {
+                              await flushReview();
+                              const store = useWorkbench.getState();
+                              store.setTask(
+                                await call("task_view", { id: item.task_id! }),
+                              );
+                              store.setBatchId(id);
+                              navigate("/");
+                            })
+                          }
+                        >
+                          {item.state === "completed"
+                            ? "查看结果"
+                            : checked(item)
+                              ? "再次检查"
+                              : "打开检查"}
+                        </button>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            {visibleItems.length === 0 && (
-              <p className="empty">所有可处理文件都已复核。</p>
+            {!visibleItems.length && (
+              <p className="empty">没有符合条件的文件。</p>
             )}
           </>
         )}

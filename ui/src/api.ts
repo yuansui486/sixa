@@ -40,6 +40,7 @@ export interface Entity {
   display: { start: number; end: number };
   text: string;
   replacement: string | null;
+  effective_replacement?: string;
 }
 export interface Selection {
   id: string;
@@ -80,6 +81,7 @@ export interface Region {
   replacement: string | null;
 }
 export interface DocumentPreview {
+  kind?: "pages" | "docx" | "office_content" | "text";
   revision: number;
   pages: {
     index: number;
@@ -90,6 +92,26 @@ export interface DocumentPreview {
   text: string | null;
   warnings: string[];
 }
+export interface OfficeAnchor {
+  id: string;
+  text: string;
+  display: { start: number; end: number };
+  label: string;
+  available_in_layout: boolean;
+}
+export interface OfficeImage {
+  index: number;
+  name: string;
+  occurrences: string[];
+}
+export interface OfficePreview {
+  revision: number;
+  layout_available: boolean;
+  reason: string | null;
+  anchors: OfficeAnchor[];
+  images: OfficeImage[];
+  warnings: string[];
+}
 export interface RegionMutationAck {
   revision: number;
   region_id: string;
@@ -97,6 +119,20 @@ export interface RegionMutationAck {
 export interface AppSettings extends TaskOptions {
   concurrency: number;
 }
+export type CloseBehavior = "ask" | "tray" | "exit";
+export interface DesktopPreferences {
+  close_behavior: CloseBehavior;
+  tray_available: boolean;
+}
+export interface CloseRequest {
+  id: string;
+  phase: "choice" | "saving" | "confirm" | "stopping" | "slow";
+  tray_available: boolean;
+  active_tasks: number;
+  active_downloads: number;
+}
+export type CloseAction =
+  "tray" | "exit" | "saved" | "stop" | "cancel" | "force" | "wait";
 export interface ModelPackageStatus {
   id: string;
   version: string;
@@ -106,6 +142,8 @@ export interface ModelPackageStatus {
   installed: boolean;
   ready: boolean;
   error: string | null;
+  state?:
+    "missing" | "downloading" | "installed" | "loading" | "ready" | "failed";
 }
 export interface ModelStatus {
   ready: boolean;
@@ -124,6 +162,7 @@ export interface ModelCapability {
   bytes: number;
   location: string;
   error: string | null;
+  state?: ModelPackageStatus["state"];
 }
 export interface Rule {
   id: string;
@@ -187,6 +226,7 @@ export interface IntegrationCheck {
 }
 export interface BatchView {
   meta: TaskMeta;
+  source_batch_id?: string | null;
   items: {
     index: number;
     task_id: string | null;
@@ -197,9 +237,95 @@ export interface BatchView {
     extension?: string;
     file_size?: number;
     reviewed_revision?: number;
+    review_confirmed?: boolean;
+    revision?: number;
   }[];
 }
 interface Commands {
+  get_desktop_preferences: { args: undefined; result: DesktopPreferences };
+  set_desktop_preferences: {
+    args: { closeBehavior: CloseBehavior };
+    result: DesktopPreferences;
+  };
+  get_close_request: { args: undefined; result: CloseRequest | null };
+  acknowledge_app_close: { args: { requestId: string }; result: void };
+  respond_app_close: {
+    args: { requestId: string; action: CloseAction; remember?: boolean };
+    result: CloseRequest | null;
+  };
+  review_patch: {
+    args: {
+      id: string;
+      selections: Selection[];
+      expectedRevision: number;
+      mutationId: string;
+    };
+    result: TaskView;
+  };
+  confirm_review: {
+    args: { id: string; expectedRevision: number };
+    result: TaskView;
+  };
+  clone_for_review: { args: { id: string }; result: TaskView };
+  retry_task: { args: { id: string }; result: TaskView };
+  document_manifest: {
+    args: { id: string; result: boolean };
+    result: DocumentPreview;
+  };
+  document_page: {
+    args: {
+      id: string;
+      result: boolean;
+      page: number;
+      maxDimension: number;
+      expectedRevision: number;
+    };
+    result: ArrayBuffer | number[];
+  };
+  document_draft_page: {
+    args: {
+      id: string;
+      page: number;
+      maxDimension: number;
+      expectedRevision: number;
+      requestId: string;
+    };
+    result: ArrayBuffer | number[];
+  };
+  cancel_document_preview: { args: { requestId: string }; result: void };
+  office_preview: {
+    args: { id: string; result: boolean; expectedRevision: number };
+    result: OfficePreview;
+  };
+  office_preview_docx: {
+    args: { id: string; result: boolean; expectedRevision: number };
+    result: ArrayBuffer | number[];
+  };
+  query_tasks: {
+    args: {
+      query: {
+        search?: string;
+        state?: TaskState;
+        from?: number;
+        to?: number;
+        offset: number;
+        limit: number;
+      };
+    };
+    result: {
+      items: TaskMeta[];
+      total: number;
+      offset?: number;
+      limit?: number;
+    };
+  };
+  retry_batch: {
+    args: { id: string; failedOnly: boolean; requestId?: string };
+    result: BatchView;
+  };
+  reveal_file: { args: { path: string }; result: void };
+  test_rule: { args: { rule: Rule; text: string }; result: Entity[] };
+  retry_model_load: { args: { packageId: string }; result: ModelStatus };
   auth_status: { args: undefined; result: AuthStatus };
   auth_login: {
     args: { tenantCode: string; username: string; password: string };
@@ -220,11 +346,21 @@ interface Commands {
   document_preview: { args: { id: string }; result: DocumentPreview };
   document_result_preview: { args: { id: string }; result: DocumentPreview };
   upsert_region: {
-    args: { id: string; region: Region; expectedRevision: number };
+    args: {
+      id: string;
+      region: Region;
+      expectedRevision: number;
+      mutationId?: string;
+    };
     result: RegionMutationAck;
   };
   remove_region: {
-    args: { id: string; regionId: string; expectedRevision: number };
+    args: {
+      id: string;
+      regionId: string;
+      expectedRevision: number;
+      mutationId?: string;
+    };
     result: RegionMutationAck;
   };
   execute: { args: { id: string }; result: TaskView };
@@ -303,6 +439,17 @@ export function capabilityReady(
   const capability = model?.capabilities?.find((item) => item.id === id);
   return capability
     ? capability.ready
+    : id === "raner-v1"
+      ? !!model?.ready
+      : false;
+}
+export function capabilityInstalled(
+  model: ModelStatus | undefined,
+  id: string,
+): boolean {
+  const capability = model?.capabilities?.find((item) => item.id === id);
+  return capability
+    ? capability.installed
     : id === "raner-v1"
       ? !!model?.ready
       : false;

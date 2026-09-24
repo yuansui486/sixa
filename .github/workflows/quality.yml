@@ -1,0 +1,82 @@
+name: 桌面质量检查（不下载生产模型）
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+      - uses: Swatinem/rust-cache@v2
+      - name: 配置 Windows 编译环境
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+      - name: 配置 macOS 编译环境
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "$GITHUB_ENV"
+      - name: 文件格式、保存、调度与协议测试
+        # Test builds do not package sidecars or a model runtime. No OSS requests.
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
+        run: cargo test --workspace --locked
+      - name: 逐页预览资源探针
+        run: cargo run --release --locked -p formats --example pdf_resources -- 100 preview
+      - name: 准备 Windows 安装回归工具
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+            choco install nsis --version=3.11 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          cargo build --locked -p sixa-mcp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 验证 MCP 占用下的安装和卸载
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & src-tauri/installer/tests/run.ps1 -McpExecutable target/debug/sixa-mcp.exe -MakeNsis "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+
+  interface:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-interface-results
+          path: ui/test-results/
+          retention-days: 7

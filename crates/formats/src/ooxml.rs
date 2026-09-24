@@ -6,6 +6,8 @@ use quick_xml::{Reader, events::Event};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read, Write};
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
+mod preview;
+pub use preview::Presentation;
 
 const MAX_EXPANDED: u64 = 200 * 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]

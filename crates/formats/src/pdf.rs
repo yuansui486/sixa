@@ -3,6 +3,7 @@ use domain::{Error, PdfMode, Point, RegionDto, Result};
 use image::{Rgba, RgbaImage, imageops};
 use mupdf::pdf::{PdfDocument, PdfWriteOptions};
 use mupdf::{Colorspace, InsertImageOptions, Matrix, PageImageSource, Pixmap, Rect, Size};
+use std::io::Write;
 
 const MAX_PAGES: i32 = 200;
 const TARGET_SCALE: f32 = 2.0;
@@ -18,6 +19,12 @@ pub fn validate(bytes: &[u8]) -> Result<()> {
 }
 
 pub fn page_count(bytes: &[u8]) -> Result<usize> {
+    static CONFIGURE: std::sync::Once = std::sync::Once::new();
+    CONFIGURE.call_once(|| {
+        // The native resource cache is shared across renderer threads. PDF
+        // objects and active page pixels remain outside this cache budget.
+        let _ = mupdf::set_store_max_size(64 * 1024 * 1024);
+    });
     let document = PdfDocument::from_copied_bytes(bytes).map_err(pdf_error)?;
     let pages = document.page_count().map_err(pdf_error)?;
     if pages <= 0 || pages > MAX_PAGES {
@@ -59,6 +66,7 @@ pub fn redact_interruptible(
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Vec<u8>> {
     check()?;
+    page_count(bytes)?;
     validate_regions(bytes, regions)?;
     match mode {
         PdfMode::SafeRebuild => safe_rebuild(bytes, regions, font, check),
@@ -80,22 +88,127 @@ fn render_pages_with_bounds(
     let mut result = Vec::with_capacity(count as usize);
     for index in 0..count {
         check()?;
-        let page = document.load_page(index).map_err(pdf_error)?;
-        let bounds = page.bounds().map_err(pdf_error)?;
-        let area = (bounds.width() * bounds.height()).max(1.0);
-        let scale = TARGET_SCALE.min((MAX_PAGE_PIXELS / area).sqrt());
-        let pixmap = page
-            .to_pixmap(
-                &Matrix::new_scale(scale, scale),
-                &Colorspace::device_rgb(),
-                false,
-                false,
-            )
-            .map_err(pdf_error)?;
-        result.push((pixmap_to_image(&pixmap)?, bounds));
+        result.push(render_document_page(&document, index, None)?);
         check()?;
     }
     Ok(result)
+}
+
+fn render_document_page(
+    document: &PdfDocument,
+    index: i32,
+    max_dimension: Option<u32>,
+) -> Result<(RgbaImage, Rect)> {
+    let page = document.load_page(index).map_err(pdf_error)?;
+    let bounds = page.bounds().map_err(pdf_error)?;
+    let area = (bounds.width() * bounds.height()).max(1.0);
+    let mut scale = TARGET_SCALE.min((MAX_PAGE_PIXELS / area).sqrt());
+    if let Some(limit) = max_dimension {
+        scale = scale.min(limit as f32 / bounds.width().max(bounds.height()).max(1.0));
+    }
+    let pixmap = page
+        .to_pixmap(
+            &Matrix::new_scale(scale, scale),
+            &Colorspace::device_rgb(),
+            false,
+            false,
+        )
+        .map_err(pdf_error)?;
+    Ok((pixmap_to_image(&pixmap)?, bounds))
+}
+
+/// Metadata only: no page pixels are allocated.
+pub fn page_dimensions(bytes: &[u8]) -> Result<Vec<(u32, u32)>> {
+    let count = page_count(bytes)?;
+    let document = PdfDocument::from_copied_bytes(bytes).map_err(pdf_error)?;
+    (0..count)
+        .map(|index| {
+            let bounds = document
+                .load_page(index as i32)
+                .map_err(pdf_error)?
+                .bounds()
+                .map_err(pdf_error)?;
+            let scale = TARGET_SCALE
+                .min((MAX_PAGE_PIXELS / (bounds.width() * bounds.height()).max(1.0)).sqrt());
+            Ok((
+                (bounds.width() * scale).ceil().max(1.0) as u32,
+                (bounds.height() * scale).ceil().max(1.0) as u32,
+            ))
+        })
+        .collect()
+}
+
+pub fn render_page(bytes: &[u8], index: u32, max_dimension: Option<u32>) -> Result<RgbaImage> {
+    if index as usize >= page_count(bytes)? {
+        return Err(Error::Invalid("页面不存在".into()));
+    }
+    let document = PdfDocument::from_copied_bytes(bytes).map_err(pdf_error)?;
+    Ok(render_document_page(&document, index as i32, max_dimension)?.0)
+}
+
+pub fn visit_pages(
+    bytes: &[u8],
+    visit: &mut dyn FnMut(u32, RgbaImage) -> Result<()>,
+) -> Result<()> {
+    let count = page_count(bytes)?;
+    let document = PdfDocument::from_copied_bytes(bytes).map_err(pdf_error)?;
+    for index in 0..count {
+        visit(
+            index as u32,
+            render_document_page(&document, index as i32, None)?.0,
+        )?;
+    }
+    Ok(())
+}
+
+/// Render just one draft page through the same redaction helpers as export.
+pub fn draft_page(
+    bytes: &[u8],
+    index: u32,
+    max_dimension: u32,
+    regions: &[RegionDto],
+    mode: PdfMode,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<RgbaImage> {
+    check()?;
+    if index as usize >= page_count(bytes)? {
+        return Err(Error::Invalid("页面不存在".into()));
+    }
+    validate_regions(bytes, regions)?;
+    let font = crate::fonts::replacement_font()?;
+    let mut document = PdfDocument::from_copied_bytes(bytes).map_err(pdf_error)?;
+    let image = match mode {
+        PdfMode::SafeRebuild => {
+            let mut output = PdfDocument::new();
+            append_safe_page(
+                &document,
+                &mut output,
+                index as usize,
+                regions,
+                Some(&font),
+                check,
+            )?;
+            render_document_page(&output, 0, Some(max_dimension))?.0
+        }
+        PdfMode::Fidelity => {
+            apply_fidelity_page(&mut document, index as usize, regions, Some(&font), check)?;
+            render_document_page(&document, index as i32, Some(max_dimension))?.0
+        }
+    };
+    check()?;
+    Ok(image)
+}
+
+fn local_regions(regions: &[RegionDto], index: u32) -> Vec<RegionDto> {
+    regions
+        .iter()
+        .filter(|region| region.page == index)
+        .cloned()
+        .map(|mut region| {
+            region.page = 0;
+            region
+        })
+        .collect()
 }
 
 fn validate_regions(bytes: &[u8], regions: &[RegionDto]) -> Result<()> {
@@ -113,30 +226,44 @@ fn safe_rebuild(
     font: Option<&FontArc>,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Vec<u8>> {
-    let rendered = render_pages_with_bounds(bytes, check)?;
-    let mut images = rendered
-        .iter()
-        .map(|(image, _)| image.clone())
-        .collect::<Vec<_>>();
-    crate::raster::redact_pages_interruptible(&mut images, regions, font, check)?;
-
+    let count = page_count(bytes)?;
+    let source = PdfDocument::from_copied_bytes(bytes).map_err(pdf_error)?;
     let mut output = PdfDocument::new();
-    for (image, (_, bounds)) in images.iter().zip(rendered.iter()) {
-        check()?;
-        let mut page = output
-            .new_page(Size::new(bounds.width(), bounds.height()))
-            .map_err(pdf_error)?;
-        let pixmap = image_to_pixmap(image)?;
-        page.insert_image(
-            &mut output,
-            Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
-            PageImageSource::Pixmap(&pixmap),
-            InsertImageOptions::default(),
-        )
-        .map_err(pdf_error)?;
-        check()?;
+    for index in 0..count {
+        append_safe_page(&source, &mut output, index, regions, font, check)?;
     }
-    write_and_verify(output, rendered.len(), &[], check)
+    write_and_verify(output, count, &[], check)
+}
+
+fn append_safe_page(
+    source: &PdfDocument,
+    output: &mut PdfDocument,
+    index: usize,
+    regions: &[RegionDto],
+    font: Option<&FontArc>,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    check()?;
+    let (mut image, bounds) = render_document_page(source, index as i32, None)?;
+    crate::raster::redact_pages_interruptible(
+        std::slice::from_mut(&mut image),
+        &local_regions(regions, index as u32),
+        font,
+        check,
+    )?;
+    let mut page = output
+        .new_page(Size::new(bounds.width(), bounds.height()))
+        .map_err(pdf_error)?;
+    let image_xref = add_compressed_image(output, &image)?;
+    page.insert_image(
+        output,
+        Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
+        PageImageSource::ExistingXref(image_xref),
+        InsertImageOptions::default(),
+    )
+    .map_err(pdf_error)?;
+    check()?;
+    Ok(())
 }
 
 fn fidelity_redact(
@@ -145,13 +272,7 @@ fn fidelity_redact(
     font: Option<&FontArc>,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Vec<u8>> {
-    let rendered = render_pages_with_bounds(bytes, check)?;
-    let mut redacted_images = rendered
-        .iter()
-        .map(|(image, _)| image.clone())
-        .collect::<Vec<_>>();
-    crate::raster::redact_pages_interruptible(&mut redacted_images, regions, font, check)?;
-
+    let count = page_count(bytes)?;
     let mut document = PdfDocument::from_copied_bytes(bytes).map_err(pdf_error)?;
     let embedded = document.embedded_files().map_err(pdf_error)?;
     for file in embedded {
@@ -160,69 +281,8 @@ fn fidelity_redact(
             .map_err(pdf_error)?;
     }
 
-    for (page_index, (image, (_, bounds))) in
-        redacted_images.iter().zip(rendered.iter()).enumerate()
-    {
-        check()?;
-        let page_regions = regions
-            .iter()
-            .filter(|region| region.selected && region.page == page_index as u32)
-            .collect::<Vec<_>>();
-        if page_regions.is_empty() {
-            continue;
-        }
-        let mut page = document
-            .load_pdf_page(page_index as i32)
-            .map_err(pdf_error)?;
-        let mut redaction_rects = Vec::new();
-        for region in &page_regions {
-            check()?;
-            let fallback = region_rect(region, bounds);
-            if region.text.trim().is_empty() {
-                redaction_rects.push(fallback);
-                continue;
-            }
-            let hits = page.search(region.text.trim(), 128).map_err(pdf_error)?;
-            if hits.is_empty() {
-                redaction_rects.push(fallback);
-            } else {
-                // Text can occur more than once on a page. Redacting every search
-                // hit would remove content the user did not select, so choose the
-                // hit which overlaps the reviewed region most closely.
-                let selected = hits
-                    .iter()
-                    .map(quad_rect)
-                    .max_by(|left, right| {
-                        overlap_ratio(left, &fallback).total_cmp(&overlap_ratio(right, &fallback))
-                    })
-                    .filter(|rect| overlap_ratio(rect, &fallback) > 0.0)
-                    .unwrap_or(fallback);
-                redaction_rects.push(selected);
-            }
-        }
-        for rect in redaction_rects {
-            check()?;
-            page.add_redact_annotation(rect).map_err(pdf_error)?;
-        }
-        page.apply_redactions().map_err(pdf_error)?;
-
-        for region in page_regions {
-            check()?;
-            let (x, y, width, height) = pixel_bounds(region, image.width(), image.height());
-            if width == 0 || height == 0 {
-                continue;
-            }
-            let patch = imageops::crop_imm(image, x, y, width, height).to_image();
-            let pixmap = image_to_pixmap(&patch)?;
-            page.insert_image(
-                &mut document,
-                region_rect(region, bounds),
-                PageImageSource::Pixmap(&pixmap),
-                InsertImageOptions::default(),
-            )
-            .map_err(pdf_error)?;
-        }
-        check()?;
+    for page_index in 0..count {
+        apply_fidelity_page(&mut document, page_index, regions, font, check)?;
     }
 
     let sensitive = regions
@@ -230,7 +290,110 @@ fn fidelity_redact(
         .filter(|region| region.selected && !region.text.trim().is_empty())
         .map(|region| region.text.as_str())
         .collect::<Vec<_>>();
-    write_and_verify(document, rendered.len(), &sensitive, check)
+    write_and_verify(document, count, &sensitive, check)
+}
+
+fn apply_fidelity_page(
+    document: &mut PdfDocument,
+    page_index: usize,
+    regions: &[RegionDto],
+    font: Option<&FontArc>,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    check()?;
+    let page_regions = regions
+        .iter()
+        .filter(|region| region.selected && region.page == page_index as u32)
+        .collect::<Vec<_>>();
+    if page_regions.is_empty() {
+        return Ok(());
+    }
+    let (mut image, bounds) = render_document_page(document, page_index as i32, None)?;
+    crate::raster::redact_pages_interruptible(
+        std::slice::from_mut(&mut image),
+        &local_regions(regions, page_index as u32),
+        font,
+        check,
+    )?;
+    let mut page = document
+        .load_pdf_page(page_index as i32)
+        .map_err(pdf_error)?;
+    let mut redaction_rects = Vec::new();
+    for region in &page_regions {
+        check()?;
+        let fallback = region_rect(region, &bounds);
+        if region.text.trim().is_empty() {
+            redaction_rects.push(fallback);
+            continue;
+        }
+        let hits = page.search(region.text.trim(), 128).map_err(pdf_error)?;
+        if hits.is_empty() {
+            redaction_rects.push(fallback);
+        } else {
+            // Text can occur more than once on a page. Redacting every search
+            // hit would remove content the user did not select, so choose the
+            // hit which overlaps the reviewed region most closely.
+            let selected = hits
+                .iter()
+                .map(quad_rect)
+                .max_by(|left, right| {
+                    overlap_ratio(left, &fallback).total_cmp(&overlap_ratio(right, &fallback))
+                })
+                .filter(|rect| overlap_ratio(rect, &fallback) > 0.0)
+                .unwrap_or(fallback);
+            redaction_rects.push(selected);
+        }
+    }
+    for rect in redaction_rects {
+        check()?;
+        page.add_redact_annotation(rect).map_err(pdf_error)?;
+    }
+    page.apply_redactions().map_err(pdf_error)?;
+
+    for region in page_regions {
+        check()?;
+        let (x, y, width, height) = pixel_bounds(region, image.width(), image.height());
+        if width == 0 || height == 0 {
+            continue;
+        }
+        let patch = imageops::crop_imm(&image, x, y, width, height).to_image();
+        let image_xref = add_compressed_image(document, &patch)?;
+        page.insert_image(
+            document,
+            region_rect(region, &bounds),
+            PageImageSource::ExistingXref(image_xref),
+            InsertImageOptions::default(),
+        )
+        .map_err(pdf_error)?;
+    }
+    check()?;
+    Ok(())
+}
+
+/// Insert a lossless compressed stream immediately. MuPDF's generic PNG image
+/// insertion decodes into an uncompressed PDF stream until final serialization;
+/// that would accumulate full RGB pages despite releasing our Rust images.
+fn add_compressed_image(document: &mut PdfDocument, image: &RgbaImage) -> Result<i32> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut row = Vec::with_capacity(image.width() as usize * 3);
+    for pixels in image.rows() {
+        row.clear();
+        for pixel in pixels {
+            row.extend_from_slice(&pixel.0[..3]);
+        }
+        encoder.write_all(&row)?;
+    }
+    let compressed = encoder.finish()?;
+    let dict = document.new_object_from_str(&format!(
+        "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode >>",
+        image.width(), image.height()
+    )).map_err(pdf_error)?;
+    let buffer = mupdf::Buffer::from_copied_bytes(&compressed).map_err(pdf_error)?;
+    document
+        .add_stream(&buffer, Some(&dict), true)
+        .map_err(pdf_error)?
+        .as_indirect()
+        .map_err(pdf_error)
 }
 
 fn write_and_verify(
@@ -350,25 +513,6 @@ fn pixmap_to_image(pixmap: &Pixmap) -> Result<RgbaImage> {
     Ok(image)
 }
 
-fn image_to_pixmap(image: &RgbaImage) -> Result<Pixmap> {
-    let mut pixmap = Pixmap::new_with_w_h(
-        &Colorspace::device_rgb(),
-        image.width() as i32,
-        image.height() as i32,
-        false,
-    )
-    .map_err(pdf_error)?;
-    let stride = pixmap.stride().unsigned_abs();
-    for y in 0..image.height() as usize {
-        let row = &mut pixmap.samples_mut()[y * stride..y * stride + image.width() as usize * 3];
-        for x in 0..image.width() as usize {
-            let pixel = image.get_pixel(x as u32, y as u32);
-            row[x * 3..x * 3 + 3].copy_from_slice(&pixel.0[..3]);
-        }
-    }
-    Ok(pixmap)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,10 +524,10 @@ mod tests {
     fn fixture() -> Vec<u8> {
         let mut document = PdfDocument::new();
         let mut page = document.new_page(Size::new(300.0, 200.0)).unwrap();
-        let font = std::fs::read(r"C:\Windows\Fonts\arial.ttf").unwrap();
+        let font = crate::fonts::CJK_FONT_BYTES;
         let text_options = TextOptions {
             fontname: "fixture-font".into(),
-            fontfile: Some(&font),
+            fontfile: Some(font),
             ..TextOptions::default()
         };
         {
@@ -486,5 +630,173 @@ mod tests {
         let duplicate = Rect::new(150.0, 120.0, 190.0, 140.0);
         assert!(overlap_ratio(&matching, &reviewed) > 0.7);
         assert_eq!(overlap_ratio(&duplicate, &reviewed), 0.0);
+    }
+
+    #[test]
+    fn single_page_draft_matches_export_in_both_pdf_modes() {
+        let source = fixture();
+        let font = crate::fonts::replacement_font().unwrap();
+        let mut region = sensitive_region();
+        region.replacement = Some("某人".into());
+        for mode in [PdfMode::SafeRebuild, PdfMode::Fidelity] {
+            let draft = draft_page(
+                &source,
+                0,
+                420,
+                std::slice::from_ref(&region),
+                mode,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            let exported =
+                redact(&source, std::slice::from_ref(&region), Some(&font), mode).unwrap();
+            let actual = render_page(&exported, 0, Some(420)).unwrap();
+            assert_eq!(
+                draft, actual,
+                "draft and export must share pixel processing for {mode:?}"
+            );
+        }
+        assert!(draft_page(&source, 1, 420, &[], PdfMode::SafeRebuild, &mut || Ok(())).is_err());
+        let mut checks = 0;
+        assert!(
+            draft_page(&source, 0, 420, &[region], PdfMode::Fidelity, &mut || {
+                checks += 1;
+                if checks > 2 {
+                    Err(Error::State("cancelled".into()))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        assert!(checks > 2);
+    }
+
+    #[test]
+    fn rotated_middle_page_draft_matches_export_and_preserves_other_pages() {
+        let mut document = PdfDocument::new();
+        for index in 0..3 {
+            let image = RgbaImage::from_fn(240, 160, |x, y| {
+                Rgba([(x % 230) as u8, (y % 230) as u8, (index * 60) as u8, 255])
+            });
+            let mut page = document.new_page(Size::new(120.0, 80.0)).unwrap();
+            let xref = add_compressed_image(&mut document, &image).unwrap();
+            page.insert_image(
+                &mut document,
+                Rect::new(0.0, 0.0, 120.0, 80.0),
+                PageImageSource::ExistingXref(xref),
+                InsertImageOptions::default(),
+            )
+            .unwrap();
+            if index == 1 {
+                page.set_rotation(90).unwrap();
+            }
+        }
+        let mut source = Vec::new();
+        document.write_to(&mut source).unwrap();
+        let mut region = sensitive_region();
+        region.page = 1;
+        region.text.clear();
+        region.rotation = 180.0;
+        region.replacement = Some("某公司".into());
+        region.polygon = vec![
+            Point { x: 0.2, y: 0.2 },
+            Point { x: 0.7, y: 0.2 },
+            Point { x: 0.7, y: 0.65 },
+            Point { x: 0.2, y: 0.65 },
+        ];
+        let font = crate::fonts::replacement_font().unwrap();
+        for mode in [PdfMode::SafeRebuild, PdfMode::Fidelity] {
+            let draft = draft_page(
+                &source,
+                1,
+                200,
+                std::slice::from_ref(&region),
+                mode,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            let output = redact(&source, std::slice::from_ref(&region), Some(&font), mode).unwrap();
+            assert_eq!(
+                draft,
+                render_page(&output, 1, Some(200)).unwrap(),
+                "rotated draft mismatch for {mode:?}"
+            );
+            assert_eq!(page_count(&output).unwrap(), 3);
+            if mode == PdfMode::Fidelity {
+                for page in [0, 2] {
+                    assert_eq!(
+                        render_page(&source, page, Some(200)).unwrap(),
+                        render_page(&output, page, Some(200)).unwrap()
+                    );
+                }
+                let before = render_page(&source, 1, Some(200)).unwrap();
+                assert_ne!(
+                    before, draft,
+                    "manual regions with empty OCR text must still redact"
+                );
+                for (x, y) in [(3, 3), (120, 3), (3, 190), (120, 190)] {
+                    assert_eq!(before.get_pixel(x, y), draft.get_pixel(x, y));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_single_page_and_streaming_preserve_page_geometry() {
+        let mut document = PdfDocument::new();
+        for index in 0..20 {
+            document
+                .new_page(Size::new(60.0 + index as f32, 80.0))
+                .unwrap();
+        }
+        let mut bytes = Vec::new();
+        document.write_to(&mut bytes).unwrap();
+        let dimensions = page_dimensions(&bytes).unwrap();
+        assert_eq!(dimensions.len(), 20);
+        assert_eq!(dimensions[19], (158, 160));
+        let preview = render_page(&bytes, 19, Some(80)).unwrap();
+        assert_eq!((preview.width(), preview.height()), (79, 80));
+        assert!(render_page(&bytes, 20, Some(80)).is_err());
+        let mut visited = Vec::new();
+        visit_pages(&bytes, &mut |index, image| {
+            visited.push(index);
+            assert_eq!(image.dimensions(), dimensions[index as usize]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(visited, (0..20).collect::<Vec<_>>());
+        let output = redact(&bytes, &[], None, PdfMode::SafeRebuild).unwrap();
+        assert_eq!(page_dimensions(&output).unwrap(), dimensions);
+        let mut visited_before_cancel = 0;
+        assert!(
+            visit_pages(&bytes, &mut |_, _| {
+                visited_before_cancel += 1;
+                Err(Error::State("cancelled".into()))
+            })
+            .is_err()
+        );
+        assert_eq!(visited_before_cancel, 1);
+    }
+
+    #[test]
+    fn output_page_pixels_are_compressed_before_final_serialization() {
+        let mut document = PdfDocument::new();
+        let image = RgbaImage::from_pixel(1200, 1600, Rgba([240, 245, 250, 255]));
+        let xref = add_compressed_image(&mut document, &image).unwrap();
+        let retained = document.xref_raw_stream(xref).unwrap();
+        assert!(
+            retained.len() < 100_000,
+            "a flat page must not retain its 5.76 MB RGB raster"
+        );
+        let decoded = document.xref_stream(xref).unwrap();
+        assert_eq!(decoded.len(), 1200 * 1600 * 3);
+        assert!(
+            decoded
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [240, 245, 250])
+        );
     }
 }

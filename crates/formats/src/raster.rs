@@ -31,6 +31,64 @@ pub fn decode_pages(bytes: &[u8], format: RasterFormat) -> Result<Vec<RgbaImage>
     decode_pages_interruptible(bytes, format, &mut || Ok(()))
 }
 
+pub fn page_dimensions(bytes: &[u8], format: RasterFormat) -> Result<Vec<(u32, u32)>> {
+    if format != RasterFormat::Tiff {
+        let dimensions = image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| Error::Invalid(e.to_string()))?
+            .into_dimensions()
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        validate_dimensions(dimensions.0, dimensions.1)?;
+        return Ok(vec![dimensions]);
+    }
+    let mut decoder = tiff::decoder::Decoder::new(Cursor::new(bytes))
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+    let mut dimensions = Vec::new();
+    let mut pixels = 0u64;
+    loop {
+        let (width, height) = decoder
+            .dimensions()
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        validate_dimensions(width, height)?;
+        pixels += u64::from(width) * u64::from(height);
+        if dimensions.len() >= MAX_PAGES || pixels > MAX_TOTAL_PIXELS {
+            return Err(Error::Invalid("TIFF 超过页面或像素限制".into()));
+        }
+        dimensions.push((width, height));
+        if !decoder.more_images() {
+            break;
+        }
+        decoder
+            .next_image()
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+    }
+    Ok(dimensions)
+}
+
+pub fn decode_page(bytes: &[u8], format: RasterFormat, index: u32) -> Result<RgbaImage> {
+    let dimensions = page_dimensions(bytes, format)?;
+    let &(width, height) = dimensions
+        .get(index as usize)
+        .ok_or_else(|| Error::Invalid("页面不存在".into()))?;
+    if format != RasterFormat::Tiff {
+        return Ok(decode_pages(bytes, format)?.remove(0));
+    }
+    let mut decoder = tiff::decoder::Decoder::new(Cursor::new(bytes))
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+    for _ in 0..index {
+        decoder
+            .next_image()
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+    }
+    let color = decoder
+        .colortype()
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+    let decoded = decoder
+        .read_image()
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+    tiff_to_rgba(width, height, color, decoded)
+}
+
 pub fn decode_pages_interruptible(
     bytes: &[u8],
     format: RasterFormat,
@@ -117,12 +175,12 @@ fn tiff_to_rgba(
             }
         }
         ColorType::GrayA(_) => {
-            for value in samples.chunks_exact(2) {
+            for value in samples.as_chunks::<2>().0 {
                 output.extend_from_slice(&[value[0], value[0], value[0], value[1]]);
             }
         }
         ColorType::RGB(_) => {
-            for value in samples.chunks_exact(3) {
+            for value in samples.as_chunks::<3>().0 {
                 output.extend_from_slice(&[value[0], value[1], value[2], 255]);
             }
         }
@@ -437,10 +495,7 @@ mod tests {
 
     #[test]
     fn replacement_text_respects_ocr_upside_down_rotation() {
-        let font = FontArc::try_from_vec(
-            std::fs::read(r"C:\Windows\Fonts\arial.ttf").expect("Windows test font"),
-        )
-        .unwrap();
+        let font = crate::fonts::replacement_font().unwrap();
         let background = Rgba([255, 255, 255, 255]);
         let mut normal = RgbaImage::from_pixel(64, 32, background);
         let mut rotated = normal.clone();

@@ -1,0 +1,115 @@
+.sixa-docx-preview {
+  min-width: 0;
+  width: 100%;
+  color: #25352d;
+}
+.sixa-docx-note {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #617067;
+  border-bottom: 1px solid #dce3de;
+}
+.sixa-docx-host {
+  min-height: 300px;
+  width: 100%;
+  overflow: auto;
+  contain: layout paint style;
+}
+.sixa-docx-host[hidden] {
+  display: none;
+}
+.sixa-docx-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 180px;
+  padding: 20px;
+}
+.sixa-docx-fallback-note {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  margin: 12px;
+  font-size: 13px;
+}
+.sixa-docx-fallback-note button {
+  flex-shrink: 0;
+}
+.sixa-docx-other,
+.sixa-docx-warnings {
+  margin: 12px;
+  border-top: 1px solid #dce3de;
+  padding-top: 10px;
+}
+.sixa-docx-other > summary,
+.sixa-docx-warnings > summary {
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 13px;
+}
+.sixa-docx-other > p {
+  font-size: 12px;
+  color: #617067;
+  margin: 8px 0;
+}
+.sixa-docx-content {
+  height: min(65vh, 620px);
+  min-height: 240px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: #fff;
+  border: 1px solid #dce3de;
+}
+.sixa-docx-content-row {
+  box-sizing: border-box;
+  padding: 12px 18px 14px;
+  border-bottom: 1px solid #e6eae7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    14px/22px system-ui,
+    sans-serif;
+}
+.sixa-docx-content-label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 12px;
+  color: #69766e;
+}
+.sixa-docx-content mark {
+  color: inherit;
+  background: transparent;
+  text-decoration: underline;
+  text-decoration-color: #8a9690;
+  cursor: pointer;
+}
+.sixa-docx-content mark.is-selected {
+  background: #cce5d6;
+  text-decoration: none;
+}
+.sixa-docx-content mark.is-focused,
+.sixa-docx-content mark:focus-visible {
+  outline: 2px solid #247247;
+  outline-offset: 2px;
+}
+.sixa-docx-media {
+  margin: 12px;
+  font-size: 12px;
+  color: #617067;
+}
+.sixa-docx-media > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.sixa-docx-warnings li {
+  font-size: 12px;
+  margin: 6px 0;
+}
