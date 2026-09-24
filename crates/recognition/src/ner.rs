@@ -98,18 +98,28 @@ impl Raner {
         Self::load_verified(&verified)
     }
     pub fn load_verified(verified: &crate::models::VerifiedModel) -> Result<Self> {
+        Self::load_with_progress(verified, &mut |_| {})
+    }
+    pub fn load_with_progress(
+        verified: &crate::models::VerifiedModel,
+        progress: &mut dyn FnMut(&'static str),
+    ) -> Result<Self> {
         verified.require(crate::models::RANER_MODEL_FILES)?;
         let dir = verified.directory();
+        progress("runtime");
         ort::init_from(crate::models::runtime_library_path(dir))
             .map_err(err)?
             .commit();
+        progress("session");
         let session = Session::builder()
             .map_err(err)?
             .with_intra_threads(1)
             .map_err(err)?
             .commit_from_file(dir.join("emissions.onnx"))
             .map_err(err)?;
+        progress("tokenizer");
         let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(err)?;
+        progress("crf");
         let crf: Crf =
             serde_json::from_slice(&std::fs::read(dir.join("crf.json"))?).map_err(err)?;
         crf.validate()?;

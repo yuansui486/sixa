@@ -168,6 +168,23 @@ jobs:
           file "$runtime"
           codesign --verify --strict --verbose=4 "$runtime"
 
+          # Exercise the actual packaged runtime with a tiny generated graph.
+          # No production weights, model downloads or OSS traffic are involved.
+          echo "SIXA_BUNDLED_RUNTIME=$runtime" >> "$GITHUB_ENV"
+          # Keep this mount for the following bounded inference check.
+          trap - EXIT
+          echo "SIXA_DMG_MOUNT=$mount_point" >> "$GITHUB_ENV"
+
+      - name: 验证 macOS 实际推理（离线微型模型）
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'hdiutil detach "$SIXA_DMG_MOUNT"' EXIT
+          cargo run --release --locked -p recognition --example runtime_probe \
+            --target ${{ matrix.target }} -- "$SIXA_BUNDLED_RUNTIME"
+
       - name: 保存安装程序
         uses: actions/upload-artifact@v7
         with:

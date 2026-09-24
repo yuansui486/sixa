@@ -2,6 +2,7 @@ use crate::{CapabilityStatus, RuntimeModelStatus, Worker, poisoned, verify_insta
 use domain::{Error, OcrProfile, Result, TaskOptions};
 use recognition::{Ner, ocr::OcrRun};
 use std::{
+    cell::Cell,
     io::Write,
     path::Path,
     sync::{Arc, Mutex, atomic::Ordering},
@@ -13,6 +14,46 @@ use uuid::Uuid;
 
 pub const IDS: [&str; 3] = ["raner-v1", "ppocrv4-mobile-v1", "ppocrv4-accurate-v1"];
 const LABELS: [&str; 3] = ["中文实体识别", "轻量 OCR", "高精度 OCR"];
+
+fn load_label(stage: &str) -> &str {
+    match stage {
+        "inspect" => "检查本机模型文件",
+        "runtime" => "加载 ONNX 推理引擎",
+        "session" => "读取实体模型并初始化计算图",
+        "tokenizer" => "加载中文分词器",
+        "crf" => "加载实体解码参数",
+        "det.onnx" => "初始化文字检测模型",
+        "cls.onnx" => "初始化文字方向模型",
+        "rec.onnx" => "初始化文字识别模型",
+        "warmup" => "执行首次推理验证",
+        _ => stage,
+    }
+}
+
+fn log_load(root: &Path, operation: Uuid, id: &str, start: Instant, stage: &str) {
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("logs/models.log"))
+    {
+        let _ = writeln!(
+            log,
+            "{} {} {} {}ms {} arch={}",
+            chrono::Utc::now().to_rfc3339(),
+            operation,
+            id,
+            start.elapsed().as_millis(),
+            stage,
+            std::env::consts::ARCH
+        );
+    }
+}
+
+fn guarded_load<T>(load: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(load)).unwrap_or_else(|_| {
+        Err(Error::ModelsNotReady("推理引擎发生内部异常，请退出私匣后重新打开；如仍失败，请提供 logs/models.log 中的加载阶段记录".into()))
+    })
+}
 #[derive(Clone, Copy)]
 pub struct Requirements {
     mask: u8,
@@ -152,17 +193,36 @@ pub fn ensure(
         let start = Instant::now();
         let local_run = OcrRun::new()?;
         let run = run.unwrap_or(&local_run);
-        let result: Result<_> = (|| {
+        let stage = Cell::new("inspect");
+        let mut progress = |value: &'static str| {
+            stage.set(value);
+            log_load(root, operation_id, id, start, value);
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "model-progress",
+                    serde_json::json!({
+                        "id":id, "stage":"loading", "operation_id":operation_id,
+                        "elapsed_ms":start.elapsed().as_millis(), "message":load_label(value)
+                    }),
+                );
+            }
+        };
+        let result: Result<_> = guarded_load(|| {
+            progress("inspect");
             let verified = verify_installed(root, id, full_verify)?;
             if worker.loaded.load(Ordering::Acquire) & bit == 0 {
                 match index {
                     0 => {
-                        let mut model = recognition::ner::Raner::load_verified(&verified)?;
+                        let mut model =
+                            recognition::ner::Raner::load_with_progress(&verified, &mut progress)?;
+                        progress("warmup");
                         model.analyze_with_run("张三在北京工作", run)?;
                         engine.ner = Some(Box::new(model));
                     }
                     1 | 2 => {
-                        let mut model = recognition::ocr::PpOcr::load_verified(&verified)?;
+                        let mut model =
+                            recognition::ocr::PpOcr::load_with_progress(&verified, &mut progress)?;
+                        progress("warmup");
                         model.warm_up_with_run(run)?;
                         if index == 1 {
                             engine.ocr_mobile = Some(Box::new(model));
@@ -175,7 +235,8 @@ pub fn ensure(
             }
             worker.loaded.fetch_or(bit, Ordering::Release);
             Ok(verified)
-        })();
+        })
+        .map_err(|error| Error::ModelsNotReady(format!("{}：{error}", load_label(stage.get()))));
         {
             let mut status = status.lock().map_err(poisoned)?;
             let capability = &mut status.capabilities[index];
@@ -218,21 +279,13 @@ pub fn ensure(
             let _ = app.emit("model-progress", serde_json::json!({"id":id,"stage":if result.is_ok() {"ready"} else if run.is_cancelled() {"cancelled"} else {"failed"},"operation_id":operation_id,"elapsed_ms":start.elapsed().as_millis(),"message":result.as_ref().err().map(ToString::to_string)}));
         }
         // Metadata only: never write source paths or document text to diagnostics.
-        if let Ok(mut log) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(root.join("logs/models.log"))
-        {
-            let _ = writeln!(
-                log,
-                "{} {} {} {}ms {}",
-                chrono::Utc::now().to_rfc3339(),
-                operation_id,
-                id,
-                start.elapsed().as_millis(),
-                if result.is_ok() { "ready" } else { "failed" }
-            );
-        }
+        log_load(
+            root,
+            operation_id,
+            id,
+            start,
+            if result.is_ok() { "ready" } else { "failed" },
+        );
         publish(status, app)?;
         if run.is_cancelled() {
             return Err(Error::State("任务已取消".into()));
@@ -287,6 +340,75 @@ pub fn unload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_panic_becomes_an_error_without_poisoning_worker_lock() {
+        let worker = Mutex::new(());
+        let guard = worker.lock().unwrap();
+        let result: Result<()> =
+            guarded_load(|| panic!("synthetic runtime initialization failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("推理引擎发生内部异常")
+        );
+        drop(guard);
+        assert!(worker.lock().is_ok());
+        assert_eq!(guarded_load(|| Ok(42)).unwrap(), 42);
+    }
+    #[test]
+    fn loading_phase_is_recorded_before_completion() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("logs")).unwrap();
+        let operation = Uuid::new_v4();
+        let start = Instant::now();
+        log_load(root.path(), operation, IDS[0], start, "session");
+        let log = std::fs::read_to_string(root.path().join("logs/models.log")).unwrap();
+        assert!(log.contains("session arch="));
+        assert!(!log.contains("ready"));
+    }
+    #[test]
+    fn failed_preparation_never_leaves_a_loading_capability() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = Arc::new(Worker {
+            engine: Mutex::new(Engine {
+                store: storage::Store::open(root.path(), zeroize::Zeroizing::new([31; 32]))
+                    .unwrap(),
+                ner: None,
+                ocr_mobile: None,
+                ocr_accurate: None,
+                active_ocr: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            }),
+            loaded: std::sync::atomic::AtomicU8::new(0),
+        });
+        let status = Arc::new(Mutex::new(initial(root.path())));
+        let workers = [worker.clone()];
+        let result = ensure(
+            LoadContext {
+                root: root.path(),
+                engines: &workers,
+                status: &status,
+                app: None,
+            },
+            &mut worker.engine.lock().unwrap(),
+            &worker,
+            Requirements::text(),
+            None,
+            false,
+        );
+        assert!(result.is_err());
+        let snapshot = status.lock().unwrap();
+        assert_ne!(snapshot.capabilities[0].state, "loading");
+        assert!(!snapshot.ready);
+        assert!(
+            snapshot
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("检查本机模型文件")
+        );
+        assert_eq!(worker.loaded.load(Ordering::Acquire), 0);
+    }
     #[test]
     fn text_and_visual_formats_request_only_the_needed_models() {
         let mut options = TaskOptions::default();

@@ -115,17 +115,21 @@ pub fn runtime_library_path(model_dir: &Path) -> PathBuf {
 
 #[cfg(target_os = "macos")]
 pub fn runtime_library_path(model_dir: &Path) -> PathBuf {
+    macos_runtime_path(model_dir, std::env::current_exe().ok().as_deref())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_runtime_path(model_dir: &Path, executable: Option<&Path>) -> PathBuf {
     let local = model_dir.join("libonnxruntime.dylib");
-    if local.is_file() {
-        return local;
+    // Installed applications must use the matching, signed runtime in the bundle.
+    // A stale library left in a model directory must not override an app update.
+    let bundled = executable
+        .and_then(Path::parent)
+        .map(|directory| directory.join("../Resources/libonnxruntime.dylib"));
+    if let Some(bundled) = bundled.filter(|path| path.is_file()) {
+        return bundled;
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.parent()
-                .map(|directory| directory.join("../Resources/libonnxruntime.dylib"))
-        })
-        .unwrap_or(local)
+    local
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -204,6 +208,27 @@ fn check_with_required(dir: &Path, required: &[&str], hash_files: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn macos_bundle_runtime_wins_over_stale_model_library() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("Sixa.app/Contents/MacOS/sixa");
+        let resources = root.path().join("Sixa.app/Contents/Resources");
+        let models = root.path().join("models/raner-v1");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        let local = models.join("libonnxruntime.dylib");
+        std::fs::write(&local, b"old runtime").unwrap();
+        assert_eq!(macos_runtime_path(&models, Some(&executable)), local);
+        let bundled = resources.join("libonnxruntime.dylib");
+        std::fs::write(&bundled, b"bundled runtime").unwrap();
+        assert_eq!(
+            macos_runtime_path(&models, Some(&executable))
+                .canonicalize()
+                .unwrap(),
+            bundled.canonicalize().unwrap()
+        );
+    }
     #[test]
     fn manifest_rejects_corruption_and_windows_case_collisions() {
         let dir = tempfile::tempdir().unwrap();

@@ -167,12 +167,20 @@ impl PpOcr {
         Self::load_verified(&verified)
     }
     pub fn load_verified(verified: &crate::models::VerifiedModel) -> Result<Self> {
+        Self::load_with_progress(verified, &mut |_| {})
+    }
+    pub fn load_with_progress(
+        verified: &crate::models::VerifiedModel,
+        progress: &mut dyn FnMut(&'static str),
+    ) -> Result<Self> {
         verified.require(crate::models::OCR_MODEL_FILES)?;
         let dir = verified.directory();
+        progress("runtime");
         ort::init_from(crate::models::runtime_library_path(dir))
             .map_err(model_error)?
             .commit();
-        let load = |name: &str| {
+        let mut load = |name: &'static str| {
+            progress(name);
             Session::builder()
                 .map_err(model_error)?
                 .with_intra_threads(1)
