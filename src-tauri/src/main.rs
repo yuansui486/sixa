@@ -2,9 +2,9 @@
 mod activity;
 mod auth;
 mod batch_jobs;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod integration;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 #[path = "integration_non_windows.rs"]
 mod integration;
 mod lifecycle;
@@ -1249,6 +1249,12 @@ fn main() {
             });
             lifecycle::install_tray(app.handle());
             if !test_mode {
+                integration::start(app.handle().clone())?;
+            }
+            #[cfg(all(debug_assertions, target_os = "macos"))]
+            if test_mode && std::env::var_os("SIXA_MCP_TEST_DIRECTORY").is_some() {
+                // Separate transport and data root, real unauthenticated dispatch.
+                // Never bypass login or model checks in the native smoke test.
                 integration::start(app.handle().clone())?;
             }
             let idle_app = app.handle().clone();

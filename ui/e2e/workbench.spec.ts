@@ -20,6 +20,7 @@ declare global {
     __rebuild_count__?: number;
     __auth_status__?: any;
     __copied_text__?: string;
+    __mcp_path__?: string;
   }
 }
 
@@ -271,7 +272,7 @@ test.beforeEach(async ({ page }) => {
         authenticated: true,
         models_ready: true,
         executable_path:
-          "C:\\Users\\tester\\AppData\\Local\\私匣\\sixa-mcp.exe",
+          window.__mcp_path__ ?? "C:\\Users\\tester\\AppData\\Local\\私匣\\sixa-mcp.exe",
         protocol_version: "1",
         supported_formats: ["TXT", "PDF", "DOCX", "XLSX", "PPTX", "PNG", "JPG"],
       }),
@@ -992,12 +993,12 @@ test("AI 工具接入展示状态、复制配置并完成本机自检", async ({
   ).toBeVisible();
   await expect(page.getByText("默认开启", { exact: true })).toBeVisible();
   await expect(
-    page.getByText("已登录，可接受任务", { exact: true }),
+    page.getByText("已登录", { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByText("已随桌面应用安装", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("已就绪", { exact: true })).toBeVisible();
+  await expect(page.getByText("已安装，处理时按需加载", { exact: true })).toBeVisible();
   await expect(page.getByLabel("通用 MCP JSON 配置")).toContainText('"sixa"');
   await expect(
     page.getByText("只向 AI 返回任务状态与结果路径", { exact: false }),
@@ -1019,6 +1020,18 @@ test("AI 工具接入展示状态、复制配置并完成本机自检", async ({
   await expect
     .poll(() => page.evaluate(() => window.__mock__.calls.integration_check))
     .toBe(1);
+  await expectNoHorizontalOverflow(page);
+});
+
+test("Mac MCP 配置保留中文空格路径并说明自动启动", async ({ page }) => {
+  const path = "/Users/test/Applications/私匣 测试.app/Contents/MacOS/sixa-mcp";
+  await page.addInitScript((value) => { window.__mcp_path__ = value; }, path);
+  await page.goto("/#/integration");
+  await expect(page.getByText("Mac 首次调用会自动打开私匣", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "复制配置" }).click();
+  await expect.poll(() => page.evaluate(() => window.__copied_text__)).toBeTruthy();
+  const config = JSON.parse((await page.evaluate(() => window.__copied_text__))!);
+  expect(config.mcpServers.sixa).toEqual({ command: path, args: ["serve"] });
   await expectNoHorizontalOverflow(page);
 });
 

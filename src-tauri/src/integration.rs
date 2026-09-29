@@ -4,14 +4,13 @@ use crate::{
 use domain::{Error, Result, TaskOptions, TaskState};
 use integration_protocol::{
     CancelJobResult, CreateJobResult, DesensitizeBatchParams, DesensitizeFileParams, ErrorCode,
-    IntegrationError, JobParams, JobResult, JobState, MAX_FRAME_BYTES, Method, PIPE_PREFIX,
+    IntegrationError, JobParams, JobResult, JobState, MAX_FRAME_BYTES, Method,
     PROTOCOL_VERSION, Request, Response, StatusResult, WaitJobParams,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    ffi::c_void,
     fs::OpenOptions,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -22,6 +21,8 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
+#[cfg(windows)]
+use {integration_protocol::PIPE_PREFIX, std::ffi::c_void};
 
 const SUPPORTED_FORMATS: &[&str] = &[
     "txt", "md", "docx", "xlsx", "xlsm", "pdf", "png", "jpg", "jpeg", "bmp", "tif", "tiff",
@@ -151,10 +152,11 @@ pub struct IntegrationCheck {
 }
 
 fn mcp_executable_path() -> PathBuf {
+    let name = if cfg!(windows) { "sixa-mcp.exe" } else { "sixa-mcp" };
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("sixa-mcp.exe")))
-        .unwrap_or_else(|| PathBuf::from("sixa-mcp.exe"))
+        .and_then(|path| path.parent().map(|parent| parent.join(name)))
+        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 #[tauri::command]
@@ -191,9 +193,9 @@ pub async fn integration_check() -> IntegrationCheck {
         };
     }
     match tokio::time::timeout(Duration::from_secs(8), mcp_stdio_check(&executable)).await {
-        Ok(Ok(())) => IntegrationCheck {
+        Ok(Ok(message)) => IntegrationCheck {
             ok: true,
-            message: "MCP 初始化、工具清单和桌面状态调用均正常，AI 工具接入已就绪".into(),
+            message,
         },
         Ok(Err(message)) => IntegrationCheck { ok: false, message },
         Err(_) => IntegrationCheck {
@@ -203,7 +205,7 @@ pub async fn integration_check() -> IntegrationCheck {
     }
 }
 
-async fn mcp_stdio_check(executable: &Path) -> std::result::Result<(), String> {
+async fn mcp_stdio_check(executable: &Path) -> std::result::Result<String, String> {
     let mut child = tokio::process::Command::new(executable)
         .arg("serve")
         .stdin(Stdio::piped())
@@ -296,23 +298,24 @@ async fn mcp_stdio_check(executable: &Path) -> std::result::Result<(), String> {
         let tool_result = &status_response["result"];
         let status = &tool_result["structuredContent"];
         if tool_result["isError"] == true {
-            let message = status["recovery_action"]
+            let message = status["message"]
                 .as_str()
-                .or_else(|| status["message"].as_str())
                 .unwrap_or("状态调用失败");
-            return Err(format!("MCP 状态调用失败：{message}"));
-        }
-        if status["authenticated"] != true || status["authorization_valid"] != true {
-            return Err("请先在私匣中登录并确认租户已开通本地数据脱敏功能".into());
-        }
-        if status["models_ready"] != true || status["ready"] != true {
-            return Err("本机模型尚未就绪，请先在模型管理页完成准备".into());
+            let recovery = status["recovery_action"].as_str().unwrap_or("");
+            return Err(format!("MCP 状态调用失败：{message}。{recovery}"));
         }
         if status["protocol_version"] != PROTOCOL_VERSION || !status["supported_formats"].is_array()
         {
             return Err("MCP 与桌面应用的协议或支持格式信息不完整，请重新安装私匣".into());
         }
-        Ok(())
+        let next = if status["authenticated"] != true || status["authorization_valid"] != true {
+            "创建任务前，请先登录并确认租户已开通私匣。"
+        } else if status["models_ready"] != true || status["ready"] != true {
+            "创建任务前，请在模型管理中完成模型安装。"
+        } else {
+            "已可创建任务；首次处理会按需加载模型，请按任务进度等待完成。"
+        };
+        Ok(format!("MCP 程序启动、协议初始化、工具清单和桌面通信均正常。{next}"))
     }
     .await;
 
@@ -364,6 +367,7 @@ where
     }
 }
 
+#[cfg(windows)]
 pub fn start(app: AppHandle) -> Result<()> {
     let pipe_name = pipe_name().map_err(Error::Io)?;
     tauri::async_runtime::spawn(async move {
@@ -374,6 +378,7 @@ pub fn start(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
 async fn serve(app: AppHandle, pipe_name: String) -> std::io::Result<()> {
     use tokio::net::windows::named_pipe::ServerOptions;
     let mut first = true;
@@ -410,10 +415,39 @@ async fn serve(app: AppHandle, pipe_name: String) -> std::io::Result<()> {
     }
 }
 
-async fn serve_client(
+#[cfg(target_os = "macos")]
+pub fn start(app: AppHandle) -> Result<()> {
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = serve_macos(app).await {
+            eprintln!("私匣本机通信服务已停止：{error}");
+        }
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn serve_macos(app: AppHandle) -> std::io::Result<()> {
+    use integration_protocol::macos::{Server, check_peer, endpoint};
+    let server = Server::bind(&endpoint())?;
+    let slots = Arc::new(tokio::sync::Semaphore::new(16));
+    loop {
+        let (stream, _) = server.listener.accept().await?;
+        if check_peer(&stream).is_err() { continue; }
+        let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _slot = slot;
+            // Includes the longest wait_job (60 seconds); idle peers cannot hold slots forever.
+            let _ = tokio::time::timeout(Duration::from_secs(90), serve_client(app, stream)).await;
+        });
+    }
+}
+
+async fn serve_client<S>(
     app: AppHandle,
-    mut stream: tokio::net::windows::named_pipe::NamedPipeServer,
-) -> std::io::Result<()> {
+    mut stream: S,
+) -> std::io::Result<()>
+where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
     loop {
         let size = stream.read_u32_le().await? as usize;
         if size == 0 || size > MAX_FRAME_BYTES {
@@ -862,7 +896,9 @@ fn validate_source(path: &Path) -> std::result::Result<PathBuf, IntegrationError
     }
     let path = path
         .canonicalize()
-        .map_err(|_| IntegrationError::new(ErrorCode::InvalidPath, "源文件不存在或不可访问"))?;
+        .map_err(|error| IntegrationError::new(ErrorCode::InvalidPath,
+            if error.kind() == std::io::ErrorKind::PermissionDenied { file_permission_hint() }
+            else { "源文件不存在或不可访问" }))?;
     if !path.is_file() {
         return Err(IntegrationError::new(
             ErrorCode::InvalidPath,
@@ -896,7 +932,9 @@ fn validate_output_dir(
     }
     let path = path
         .canonicalize()
-        .map_err(|_| IntegrationError::new(ErrorCode::InvalidPath, "输出目录不存在或不可访问"))?;
+        .map_err(|error| IntegrationError::new(ErrorCode::InvalidPath,
+            if error.kind() == std::io::ErrorKind::PermissionDenied { file_permission_hint() }
+            else { "输出目录不存在或不可访问" }))?;
     if !path.is_dir() {
         return Err(IntegrationError::new(
             ErrorCode::InvalidPath,
@@ -1070,7 +1108,18 @@ fn write_report(
 }
 
 fn map_io(error: std::io::Error) -> IntegrationError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        return IntegrationError::new(ErrorCode::InvalidPath, file_permission_hint());
+    }
     IntegrationError::new(ErrorCode::TaskFailed, format!("写入输出文件失败：{error}"))
+}
+
+fn file_permission_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "私匣无法访问文件或输出目录。请检查文件读写权限，以及系统设置 → 隐私与安全性 → 文件与文件夹中的私匣权限，再重试"
+    } else {
+        "私匣无法访问文件或输出目录，请检查当前用户的文件读写权限后重试"
+    }
 }
 
 fn parse_params<T: for<'de> Deserialize<'de>>(
@@ -1115,15 +1164,18 @@ fn is_terminal(state: JobState) -> bool {
     )
 }
 
+#[cfg(windows)]
 fn pipe_name() -> std::result::Result<String, String> {
     Ok(format!("{PIPE_PREFIX}{}", current_user_sid()?))
 }
 
+#[cfg(windows)]
 struct PipeSecurity {
     descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
     attributes: windows_sys::Win32::Security::SECURITY_ATTRIBUTES,
 }
 
+#[cfg(windows)]
 impl PipeSecurity {
     fn for_current_user() -> std::io::Result<Self> {
         use windows_sys::Win32::Security::Authorization::{
@@ -1164,12 +1216,14 @@ impl PipeSecurity {
     }
 }
 
+#[cfg(windows)]
 impl Drop for PipeSecurity {
     fn drop(&mut self) {
         unsafe { windows_sys::Win32::Foundation::LocalFree(self.descriptor) };
     }
 }
 
+#[cfg(windows)]
 fn current_user_sid() -> std::result::Result<String, String> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, HANDLE, LocalFree},
@@ -1314,6 +1368,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn pipe_is_scoped_to_the_current_windows_user() {
         let sid = current_user_sid().unwrap();
         assert!(sid.starts_with("S-1-"));

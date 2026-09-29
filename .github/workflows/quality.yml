@@ -16,7 +16,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, macos-14]
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -24,6 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.95.0'
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: 配置 Windows 编译环境
         if: runner.os == 'Windows'
@@ -37,9 +44,26 @@ jobs:
         # Test builds do not package sidecars or a model runtime. No OSS requests.
         env:
           TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --target ${{ matrix.target }}
       - name: 逐页预览资源探针
         run: cargo run --release --locked -p formats --example pdf_resources -- 100 preview
+      - uses: actions/setup-node@v5
+        if: runner.os == 'macOS'
+        with:
+          node-version: 22
+      - name: 构建 macOS 本机 MCP 测试程序
+        if: runner.os == 'macOS'
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
+        run: cargo build --locked -p sixa -p sixa-mcp --target ${{ matrix.target }}
+      - name: 验证 macOS MCP 到桌面的真实通信（无模型、无登录）
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: node scripts/mcp-smoke.mjs --desktop target/${{ matrix.target }}/debug/sixa target/${{ matrix.target }}/debug/sixa-mcp
+      - name: 验证 macOS MCP 自动启动、并发启动与超时（离线测试宿主）
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: node scripts/mcp-smoke.mjs --launch target/${{ matrix.target }}/debug/sixa-mcp
       - name: 准备 Windows 安装回归工具
         if: runner.os == 'Windows'
         shell: powershell

@@ -864,7 +864,7 @@ function Integration() {
             <div className="toolbar">
               <h2 id="integration-status-title">接入状态</h2>
               <span className={`badge ${info.enabled ? "" : "warning-badge"}`}>
-                {info.enabled ? "默认开启" : "仅支持 Windows"}
+                {info.enabled ? "默认开启" : "当前平台不支持"}
               </span>
             </div>
             <div className="integration-checks">
@@ -873,7 +873,7 @@ function Integration() {
                 label="桌面会话"
                 detail={
                   info.authenticated
-                    ? "已登录，可接受任务"
+                    ? "已登录"
                     : "需要先登录桌面应用"
                 }
               />
@@ -892,7 +892,7 @@ function Integration() {
                 ready={info.models_ready}
                 label="本机模型"
                 detail={
-                  info.models_ready ? "已就绪" : "需要在模型管理中完成准备"
+                  info.models_ready ? "已安装，处理时按需加载" : "需要在模型管理中完成安装"
                 }
               />
             </div>
@@ -938,7 +938,8 @@ function Integration() {
                 <p>
                   私匣在本机脱敏 PDF、Office、图片和文本文件，只向 AI
                   返回任务状态与结果路径，不返回文件正文。将这段配置添加到 AI
-                  工具后，请保持桌面应用运行并已登录。
+                  工具后，请先登录私匣。Mac 首次调用会自动打开私匣；Windows
+                  请保持桌面应用运行。模型加载和处理进度会通过任务状态返回。
                 </p>
                 <pre
                   className="integration-code"
@@ -949,8 +950,7 @@ function Integration() {
               </>
             ) : (
               <p>
-                当前 macOS 版本不提供 MCP
-                sidecar；桌面文件脱敏功能可以正常使用。
+                当前平台暂不提供 MCP，请使用 Windows 或 macOS 安装包。
               </p>
             )}
           </section>

@@ -2,7 +2,6 @@ use integration_protocol::{
     CancelJobResult, CreateJobResult, DesensitizeBatchParams, DesensitizeFileParams, EmptyParams,
     ErrorCode, IntegrationError, JobParams, JobResult, JobState, MAX_FRAME_BYTES, Method,
     ProtocolError, Request, Response, StatusResult, WaitJobParams, decode_frame, encode_frame,
-    pipe_name_for_sid,
 };
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -18,11 +17,17 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(windows)]
+use integration_protocol::pipe_name_for_sid;
+#[cfg(target_os = "macos")]
+mod macos;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(windows)]
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
+#[cfg(windows)]
 const CONNECT_RETRY_WINDOW: Duration = Duration::from_millis(750);
-const SERVER_INSTRUCTIONS: &str = "私匣用于在当前 Windows 电脑上脱敏用户明确指定或授权的本地文件。仅在用户要求处理具体文件时调用，不要自行扫描目录。首次调用先使用 desensitization_status；authenticated、authorization_valid、models_ready 和 ready 均为 true 后再创建任务。desensitize_file 和 desensitize_batch 只表示任务已进入队列，必须保存返回的 job_id，并按照 next_action 持续调用 wait_desensitization_job；不要因等待超时或任务仍在运行而重复创建任务。queued、analyzing、generating、exporting 是非终态，completed、partial、failed、cancelled 是终态。partial 表示只有部分结果可用，必须如实告知并提供 report_path。取消请求发出后仍应等待终态。工具不会向 AI 返回文件正文或识别出的实体值；完成后只报告状态、计数、output_paths 和 report_path，不要声称已经阅读或核验脱敏后的正文。";
+const SERVER_INSTRUCTIONS: &str = "私匣用于在当前 Windows 或 macOS 电脑上脱敏用户明确指定或授权的本地文件。仅在用户要求处理具体文件时调用，不要自行扫描目录。Mac 首次实际调用会尝试自动启动同一应用包内的私匣，最多等待 15 秒；Windows 请先手动打开私匣。未登录时请用户完成登录再继续。models_ready 表示所需模型已安装，首次任务仍可能加载模型，加载失败会返回任务错误。首次调用先使用 desensitization_status；authenticated、authorization_valid、models_ready 和 ready 均为 true 后再创建任务。desensitize_file 和 desensitize_batch 只表示任务已进入队列，必须保存返回的 job_id，并按照 next_action 持续调用 wait_desensitization_job；不要因等待超时或任务仍在运行而重复创建任务。queued、analyzing、generating、exporting 是非终态，completed、partial、failed、cancelled 是终态。partial 表示只有部分结果可用，必须如实告知并提供 report_path。取消请求发出后仍应等待终态。工具不会向 AI 返回文件正文或识别出的实体值；完成后只报告状态、计数、output_paths 和 report_path，不要声称已经阅读或核验脱敏后的正文。";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct FileInput {
@@ -81,6 +86,7 @@ struct NextAction {
 struct StatusOutput {
     authenticated: bool,
     authorization_valid: bool,
+    #[schemars(description = "所需模型是否已安装；首次任务仍可能需要加载到内存，请按任务进度等待，加载失败会返回任务错误")]
     models_ready: bool,
     ready: bool,
     supported_formats: Vec<String>,
@@ -175,6 +181,7 @@ struct PipeClient {
 }
 
 impl PipeClient {
+    #[cfg(windows)]
     fn for_current_user() -> Result<Self, IntegrationError> {
         let sid = current_user_sid().map_err(|error| {
             IntegrationError::new(
@@ -184,6 +191,11 @@ impl PipeClient {
         })?;
         let pipe_name = pipe_name_for_sid(&sid).map_err(protocol_error)?;
         Ok(Self { pipe_name })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn for_current_user() -> Result<Self, IntegrationError> {
+        Ok(Self { pipe_name: integration_protocol::macos::endpoint().to_string_lossy().into_owned() })
     }
 
     async fn request<P, R>(
@@ -198,7 +210,12 @@ impl PipeClient {
     {
         let request = Request::new(method, params).map_err(protocol_error)?;
         let request_id = request.id.clone();
+        // macOS may need up to 15 seconds to launch the desktop. This is separate
+        // from status's 5-second RPC budget; no request has been sent yet.
+        #[cfg(target_os = "macos")]
+        let mut pipe = macos::connect_or_launch(Path::new(&self.pipe_name)).await?;
         let operation = async {
+            #[cfg(windows)]
             let mut pipe = connect_pipe(&self.pipe_name).await?;
             let frame = encode_frame(&request).map_err(protocol_error)?;
             pipe.write_all(&frame).await.map_err(transport_error)?;
@@ -506,7 +523,7 @@ impl ServerHandler for DesensitizationMcp {
             .with_server_info(
                 Implementation::new("sixa", env!("CARGO_PKG_VERSION"))
                     .with_title("私匣 · 本机文件脱敏")
-                    .with_description("在 Windows 本机对 PDF、Office、图片和文本文件进行脱敏。文件正文和识别出的敏感值不会返回给 AI。"),
+                    .with_description("在 Windows 或 macOS 本机对 PDF、Office、图片和文本文件进行脱敏。文件正文和识别出的敏感值不会返回给 AI。"),
             )
             .with_instructions(SERVER_INSTRUCTIONS)
     }
@@ -770,7 +787,7 @@ fn error_output(error: IntegrationError, context: CallContext) -> ErrorOutput {
         ErrorCode::InvalidPath => (
             true,
             false,
-            "请核对源文件和输出目录均为当前 Windows 用户可访问的绝对路径；输出目录必须已经存在",
+            "请核对源文件和输出目录均为当前系统用户可访问的绝对路径；输出目录必须已经存在",
             None,
         ),
         ErrorCode::UnsupportedFormat => (
@@ -894,14 +911,6 @@ async fn connect_pipe(
     }
 }
 
-#[cfg(not(windows))]
-async fn connect_pipe(_pipe_name: &str) -> Result<(), IntegrationError> {
-    Err(IntegrationError::new(
-        ErrorCode::AppNotRunning,
-        "私匣仅支持 Windows",
-    ))
-}
-
 #[cfg(windows)]
 fn current_user_sid() -> std::io::Result<String> {
     use std::ptr::null_mut;
@@ -966,14 +975,6 @@ fn current_user_sid() -> std::io::Result<String> {
     }
 }
 
-#[cfg(not(windows))]
-fn current_user_sid() -> std::io::Result<String> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "Windows SID is unavailable",
-    ))
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = DesensitizationMcp::new(PipeClient::for_current_user()?);
@@ -1007,8 +1008,13 @@ mod tests {
                 .code,
             ErrorCode::InvalidPath
         );
-        assert!(absolute_path(r"C:\\data\\source.txt", "source_path").is_ok());
-        assert!(absolute_path(r"\\server\share\source.pdf", "source_path").is_ok());
+        #[cfg(windows)]
+        {
+            assert!(absolute_path(r"C:\\data\\source.txt", "source_path").is_ok());
+            assert!(absolute_path(r"\\server\share\source.pdf", "source_path").is_ok());
+        }
+        #[cfg(target_os = "macos")]
+        assert!(absolute_path("/Users/test/中文 空格/source.pdf", "source_path").is_ok());
     }
 
     #[test]

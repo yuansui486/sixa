@@ -4,6 +4,9 @@ use std::{io, path::PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
+pub mod macos;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const PIPE_PREFIX: &str = r"\\.\pipe\cn.shierkeji.sixa.";

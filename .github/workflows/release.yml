@@ -98,6 +98,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
           Copy-Item -LiteralPath "target/${{ matrix.target }}/release/sixa-mcp.exe" -Destination "src-tauri/binaries/sixa-mcp-${{ matrix.target }}.exe" -Force
 
+      - name: 构建并测试 macOS MCP sidecar
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p integration-protocol -p sixa-mcp --target ${{ matrix.target }}
+          cargo build --release --locked -p sixa-mcp --target ${{ matrix.target }}
+          mkdir -p src-tauri/binaries
+          cp "target/${{ matrix.target }}/release/sixa-mcp" "src-tauri/binaries/sixa-mcp-${{ matrix.target }}"
+          chmod 755 "src-tauri/binaries/sixa-mcp-${{ matrix.target }}"
+
       - name: 准备 macOS ONNX Runtime
         if: runner.os == 'macOS'
         shell: bash
@@ -162,6 +173,12 @@ jobs:
             *) exit 1 ;;
           esac
           lipo -archs "$executable" | tr ' ' '\n' | grep -Fx "$expected_arch"
+
+          mcp="$app/Contents/MacOS/sixa-mcp"
+          test -x "$mcp"
+          lipo -archs "$mcp" | tr ' ' '\n' | grep -Fx "$expected_arch"
+          codesign --verify --strict --verbose=4 "$mcp"
+          node scripts/mcp-smoke.mjs --metadata "$mcp"
 
           runtime="$app/Contents/Resources/libonnxruntime.dylib"
           test -f "$runtime"
