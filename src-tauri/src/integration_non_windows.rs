@@ -35,7 +35,7 @@ pub fn integration_info(state: State<'_, AppState>) -> IntegrationInfo {
         authenticated: state.auth.require_authenticated().is_ok(),
         models_ready: state.model.lock().map(|model| model.ready).unwrap_or(false),
         executable_path: String::new(),
-        protocol_version: "Windows 专属".into(),
+        protocol_version: "当前平台不支持".into(),
         supported_formats: SUPPORTED_FORMATS.to_vec(),
     }
 }
@@ -44,7 +44,7 @@ pub fn integration_info(state: State<'_, AppState>) -> IntegrationInfo {
 pub async fn integration_check() -> IntegrationCheck {
     IntegrationCheck {
         ok: false,
-        message: "当前版本的 MCP 本机调用仅支持 Windows；macOS 桌面脱敏功能不受影响".into(),
+        message: "当前版本的 MCP 本机调用支持 Windows 和 macOS，请使用对应平台安装包".into(),
     }
 }
 

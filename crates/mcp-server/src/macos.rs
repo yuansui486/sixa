@@ -35,12 +35,12 @@ fn app_bundle(executable: &Path) -> Option<PathBuf> {
 }
 
 pub async fn connect_or_launch(path: &Path) -> Result<UnixStream, IntegrationError> {
-    match connect(path).await {
-        Ok(stream) => return Ok(stream),
-        Err(error) if absent(&error) => (),
-        Err(error) => return Err(transport_error(error)),
-    }
     tokio::time::timeout(START_TIMEOUT, async {
+        match connect(path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) if absent(&error) => (),
+            Err(error) => return Err(transport_error(error)),
+        }
         let mut last = LAST_LAUNCH.lock().await;
         let mut launch_lock = None;
         loop {
