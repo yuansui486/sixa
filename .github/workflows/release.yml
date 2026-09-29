@@ -132,6 +132,18 @@ jobs:
           codesign --force --sign - --timestamp=none src-tauri/runtime/libonnxruntime.dylib
           codesign --verify --strict --verbose=4 src-tauri/runtime/libonnxruntime.dylib
 
+      - name: 验证 macOS 桌面 MCP 与自动启动（离线）
+        if: runner.os == 'macOS'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
+        run: |
+          set -euo pipefail
+          cargo build --locked -p sixa -p sixa-mcp --target ${{ matrix.target }}
+          node scripts/mcp-smoke.mjs --desktop "target/${{ matrix.target }}/debug/sixa" "target/${{ matrix.target }}/debug/sixa-mcp"
+          node scripts/mcp-smoke.mjs --launch "target/${{ matrix.target }}/debug/sixa-mcp"
+
       - name: 构建安装程序
         run: npx --prefix ui tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
 
