@@ -33,7 +33,9 @@ Function ${PREFIX}SixaStopMcp
     MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "无法释放私匣 MCP 程序文件。请在 AI 客户端中暂时停用私匣 MCP 连接后点击“重试”。若仍然失败，请检查安装目录访问权限或安全软件拦截。$\r$\n$\r$\n本次操作未完成；不会跳过该文件。" IDRETRY sixa_mcp_retry
   sixa_mcp_abort:
     SetErrorLevel 10
-    Abort "私匣 MCP 程序文件未释放，安装或卸载已停止。"
+    ; Abort leaves NSIS on its error page in passive mode. There is no user
+    ; action to finish that page, so an updater would wait indefinitely.
+    Quit
   sixa_mcp_done:
     ClearErrors
     Pop $1

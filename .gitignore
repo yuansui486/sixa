@@ -11,6 +11,9 @@ build/
 dist/
 /target/
 /ui/node_modules/
+/tools/release/node_modules/
+/release-assets/
+/release-ready/
 /ui/dist/
 /ui/*.tsbuildinfo
 /ui/test-results/

@@ -82,6 +82,7 @@ import "./style.css";
 import { Batch } from "./Batch";
 import { Settings } from "./Settings";
 import { Lifecycle } from "./Lifecycle";
+import { Updates, UpdateEntry } from "./Updates";
 import { Tasks } from "./History";
 import { useJobs } from "./jobs";
 import sixaMark from "./assets/sixa-mark.svg";
@@ -370,6 +371,7 @@ function Login({
             {busy ? "正在登录" : "登录"}
           </button>
         </form>
+        <UpdateEntry />
       </section>
     </main>
   );
@@ -871,11 +873,7 @@ function Integration() {
               <StatusRow
                 ready={info.authenticated}
                 label="桌面会话"
-                detail={
-                  info.authenticated
-                    ? "已登录"
-                    : "需要先登录桌面应用"
-                }
+                detail={info.authenticated ? "已登录" : "需要先登录桌面应用"}
               />
               <StatusRow
                 ready={info.mcp_available}
@@ -892,7 +890,9 @@ function Integration() {
                 ready={info.models_ready}
                 label="本机模型"
                 detail={
-                  info.models_ready ? "已安装，处理时按需加载" : "需要在模型管理中完成安装"
+                  info.models_ready
+                    ? "已安装，处理时按需加载"
+                    : "需要在模型管理中完成安装"
                 }
               />
             </div>
@@ -949,9 +949,7 @@ function Integration() {
                 </pre>
               </>
             ) : (
-              <p>
-                当前平台暂不提供 MCP，请使用 Windows 或 macOS 安装包。
-              </p>
+              <p>当前平台暂不提供 MCP，请使用 Windows 或 macOS 安装包。</p>
             )}
           </section>
 
@@ -3931,6 +3929,7 @@ createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={client}>
       <Lifecycle />
+      <Updates />
       <AuthGate />
     </QueryClientProvider>
   </React.StrictMode>,

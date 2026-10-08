@@ -2,6 +2,7 @@
 ; Tauri's existing main-process guard is outside this harness's scope.
 Unicode true
 RequestExecutionLevel user
+AutoCloseWindow true
 !include LogicLib.nsh
 Name "Sixa installer regression"
 OutFile "${OUTPUT}"
@@ -24,6 +25,11 @@ OutFile "${OUTPUT}"
 Var PassiveMode
 Function .onInit
   StrCpy $PassiveMode 0
+  ClearErrors
+  ${GetOptions} $CMDLINE "/P" $0
+  ${IfNot} ${Errors}
+    StrCpy $PassiveMode 1
+  ${EndIf}
 FunctionEnd
 Function un.onInit
   StrCpy $PassiveMode 0

@@ -44,6 +44,9 @@ pub async fn connect_or_launch(path: &Path) -> Result<UnixStream, IntegrationErr
         let mut last = LAST_LAUNCH.lock().await;
         let mut launch_lock = None;
         loop {
+            if integration_protocol::updating::active() {
+                return Err(IntegrationError::new(ErrorCode::AppUpdating, "私匣正在安装更新，请等待更新完成后重新连接 MCP"));
+            }
             match connect(path).await {
                 Ok(stream) => return Ok(stream),
                 Err(error) if absent(&error) => (),

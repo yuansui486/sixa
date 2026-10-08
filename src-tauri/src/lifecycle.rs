@@ -23,6 +23,7 @@ struct Inner {
     tray_available: bool,
     pending: Option<Pending>,
     exiting: bool,
+    updating: bool,
 }
 struct Pending {
     request: CloseRequest,
@@ -73,12 +74,16 @@ impl Lifecycle {
                 tray_available: false,
                 pending: None,
                 exiting: false,
+                updating: false,
             }),
             store: Mutex::new(store),
         })
     }
     pub fn exiting(&self) -> bool {
         self.inner.lock().is_ok_and(|inner| inner.exiting)
+    }
+    pub fn updating(&self) -> bool {
+        self.inner.lock().is_ok_and(|inner| inner.updating)
     }
 }
 
@@ -193,7 +198,8 @@ pub fn acknowledge_app_close(state: tauri::State<'_, Lifecycle>, request_id: Uui
 fn counts(app: &tauri::AppHandle) -> (usize, usize) {
     let state = app.state::<AppState>();
     // Activity counts include queued work, exports, model loading and finalization.
-    let downloads = state.installs.lock().map(|i| i.len()).unwrap_or(0);
+    let downloads = state.installs.lock().map(|i| i.len()).unwrap_or(0)
+        + usize::from(app.state::<crate::updates::Updates>().downloading());
     let runs = state.active_ocr.lock().map(|runs| runs.len()).unwrap_or(0);
     let other_work = usize::from(downloads == 0 && state.desktop.active_count() > 0);
     (runs.max(other_work), downloads)
@@ -203,7 +209,7 @@ pub fn request_close(app: &tauri::AppHandle, explicit_exit: bool) {
     let Ok(mut inner) = state.inner.lock() else {
         return;
     };
-    if inner.exiting {
+    if inner.exiting || inner.updating {
         return;
     }
     if let Some(pending) = &mut inner.pending {
@@ -303,7 +309,7 @@ fn native_prompt(app: &tauri::AppHandle, request: &CloseRequest) {
         ),
         Phase::Choice => ("界面暂未响应，是否退出私匣？", "直接退出", "取消"),
         Phase::Confirm => (
-            "仍有任务或模型下载。退出将停止这些操作，已生成的文件会保留。",
+            "仍有任务或下载。退出将停止这些操作，已生成的文件会保留。",
             "停止并退出",
             "取消",
         ),
@@ -450,6 +456,7 @@ fn respond(
             }
         }
         Action::Stop if phase == Phase::Confirm => {
+            app.state::<crate::updates::Updates>().cancel();
             app.state::<AppState>().desktop.begin_shutdown();
             app.state::<AppState>().scheduler.shutdown()?;
             app.state::<AppState>().previews.cancel_all();
@@ -487,6 +494,32 @@ fn respond(
         stop_and_wait(app.clone(), id);
     }
     Ok(Some(request))
+}
+
+pub fn begin_update(app: &tauri::AppHandle) -> Result<()> {
+    let lifecycle = app.state::<Lifecycle>();
+    let mut inner = lifecycle.inner.lock().map_err(poisoned)?;
+    if inner.pending.is_some() || inner.exiting || inner.updating {
+        return Err(Error::State("请先完成或取消当前关闭操作".into()));
+    }
+    if !app.state::<AppState>().desktop.freeze_if_idle() {
+        return Err(Error::State(
+            "仍有处理任务、导出或模型准备，请等待完成后再点击重启安装".into(),
+        ));
+    }
+    inner.updating = true;
+    Ok(())
+}
+pub fn abort_update(app: &tauri::AppHandle) {
+    if let Ok(mut inner) = app.state::<Lifecycle>().inner.lock() {
+        inner.updating = false;
+    }
+    app.state::<AppState>().desktop.resume();
+}
+pub fn finish_update(app: &tauri::AppHandle) {
+    if let Ok(mut inner) = app.state::<Lifecycle>().inner.lock() {
+        inner.exiting = true;
+    }
 }
 fn finish_exit(
     app: &tauri::AppHandle,

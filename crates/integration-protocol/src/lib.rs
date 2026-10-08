@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod updating;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -124,6 +125,7 @@ impl Response {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     AppNotRunning,
+    AppUpdating,
     AuthRequired,
     AuthExpired,
     ModelsNotReady,

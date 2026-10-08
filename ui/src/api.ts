@@ -241,7 +241,39 @@ export interface BatchView {
     revision?: number;
   }[];
 }
+export interface AppUpdateStatus {
+  revision: number;
+  current_version: string;
+  version: string | null;
+  notes: string | null;
+  phase:
+    | "idle"
+    | "checking"
+    | "current"
+    | "available"
+    | "downloading"
+    | "verifying"
+    | "ready"
+    | "installing"
+    | "failed";
+  automatic: boolean;
+  last_check: number;
+  downloaded: number;
+  total: number | null;
+  bytes_per_second: number;
+  eta_seconds: number | null;
+  error: string | null;
+}
 interface Commands {
+  get_app_update_status: { args: undefined; result: AppUpdateStatus };
+  set_app_update_preferences: {
+    args: { automatic: boolean };
+    result: AppUpdateStatus;
+  };
+  check_app_update: { args: undefined; result: AppUpdateStatus };
+  download_app_update: { args: undefined; result: AppUpdateStatus };
+  cancel_app_update: { args: undefined; result: void };
+  install_app_update: { args: undefined; result: AppUpdateStatus };
   get_desktop_preferences: { args: undefined; result: DesktopPreferences };
   set_desktop_preferences: {
     args: { closeBehavior: CloseBehavior };

@@ -3,6 +3,7 @@
 本项目源码采用 `AGPL-3.0-or-later`，完整文本见 `LICENSE`。应用仍为发布候选；正式分发前会依据锁文件生成完整的软件物料清单并完成许可证复核。
 
 - Tauri、React、TypeScript、Vite、Tokio、Serde、Rusqlite 等依赖保持各自上游许可证。
+- Tauri updater 插件：MIT / Apache-2.0；minisign-verify：MIT，用于验证应用更新包签名。OSS 上传工具 ali-oss 仅在发布流程中使用，不进入客户端安装包。
 - docx-preview 0.4.1：Apache-2.0，用于本机 Word 轻量排版；JSZip：MIT 或 GPL-3.0 双许可证，本项目选择 MIT。两者上游许可证随安装包保存在 `licenses/`。
 - ONNX Runtime：MIT；Windows 模型包包含对应运行库、`LICENSE` 和 `ThirdPartyNotices.txt`，macOS 安装包固定捆绑官方 1.23.2 universal2 运行库。
 - RaNER：来源 `iic/nlp_raner_named-entity-recognition_chinese-base-generic`；本地模型 README 的 metadata 声明 Apache License 2.0。转换权重不随基础安装包发布；公开模型分发前需一并保留上游通知和来源。

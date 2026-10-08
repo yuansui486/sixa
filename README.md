@@ -12,6 +12,8 @@ Windows 安装包附带通用 MCP stdio 服务，供本机 AI 工具异步创建
 
 ## 构建和验证
 
+从 1.0.9 起支持应用内更新：每天自动检查，确认后从阿里云 OSS 下载，保存修改后重启安装。首次接入、OSS 目录和后续发布步骤见 [应用更新与发布](docs/automatic-updates.md)。
+
 需要 Rust 1.95+、Node.js 和对应平台的 Tauri v2 编译工具链。Windows 本地依次执行：
 
 ```powershell

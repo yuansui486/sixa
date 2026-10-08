@@ -10,6 +10,11 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "=2.13.2"
+minisign-verify = "0.2"
+base64 = "0.22"
+semver = "1"
+tempfile.workspace = true
 domain.workspace = true
 recognition.workspace = true
 storage.workspace = true
@@ -17,7 +22,7 @@ task-engine.workspace = true
 model-manager.workspace = true
 integration-protocol.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-tokio = { version = "1", features = ["io-util", "net", "process", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "net", "process", "sync", "time", "macros"] }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
@@ -27,6 +32,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 custom-protocol = ["tauri/custom-protocol"]
 [dev-dependencies]
 tempfile.workspace = true
+tauri = { version = "2", features = ["test"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", default-features = false, features = ["windows-native"] }

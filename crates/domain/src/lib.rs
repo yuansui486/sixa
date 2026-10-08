@@ -18,6 +18,21 @@ pub struct DesktopPreferences {
     pub close_behavior: CloseBehavior,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdatePreferences {
+    pub automatic: bool,
+    pub last_check: i64,
+}
+impl Default for UpdatePreferences {
+    fn default() -> Self {
+        Self {
+            automatic: true,
+            last_check: 0,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, Serialize)]
 #[serde(tag = "code", content = "message", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Error {

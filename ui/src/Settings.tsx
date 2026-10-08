@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { call, message, type AppSettings, type CloseBehavior } from "./api";
 import { usePreferences, type SidebarMode } from "./preferences";
+import { UpdateEntry } from "./Updates";
 export function Settings() {
   const preferences = usePreferences();
   const client = useQueryClient();
@@ -199,6 +200,7 @@ export function Settings() {
         快捷键：Ctrl / ⌘ S 保存 · Ctrl / ⌘ Z 撤销 · Ctrl / ⌘ F 筛选实体 · Esc
         取消框选
       </p>
+      <UpdateEntry settings />
     </>
   );
 }

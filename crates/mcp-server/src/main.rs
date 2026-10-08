@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use integration_protocol::pipe_name_for_sid;
 use integration_protocol::{
     CancelJobResult, CreateJobResult, DesensitizeBatchParams, DesensitizeFileParams, EmptyParams,
     ErrorCode, IntegrationError, JobParams, JobResult, JobState, MAX_FRAME_BYTES, Method,
@@ -17,8 +19,6 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(windows)]
-use integration_protocol::pipe_name_for_sid;
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -86,7 +86,9 @@ struct NextAction {
 struct StatusOutput {
     authenticated: bool,
     authorization_valid: bool,
-    #[schemars(description = "所需模型是否已安装；首次任务仍可能需要加载到内存，请按任务进度等待，加载失败会返回任务错误")]
+    #[schemars(
+        description = "所需模型是否已安装；首次任务仍可能需要加载到内存，请按任务进度等待，加载失败会返回任务错误"
+    )]
     models_ready: bool,
     ready: bool,
     supported_formats: Vec<String>,
@@ -195,7 +197,11 @@ impl PipeClient {
 
     #[cfg(target_os = "macos")]
     fn for_current_user() -> Result<Self, IntegrationError> {
-        Ok(Self { pipe_name: integration_protocol::macos::endpoint().to_string_lossy().into_owned() })
+        Ok(Self {
+            pipe_name: integration_protocol::macos::endpoint()
+                .to_string_lossy()
+                .into_owned(),
+        })
     }
 
     async fn request<P, R>(
@@ -208,6 +214,12 @@ impl PipeClient {
         P: Serialize,
         R: DeserializeOwned,
     {
+        if integration_protocol::updating::active() {
+            return Err(IntegrationError::new(
+                ErrorCode::AppUpdating,
+                "私匣正在安装更新，请等待更新完成后重新连接 MCP",
+            ));
+        }
         let request = Request::new(method, params).map_err(protocol_error)?;
         let request_id = request.id.clone();
         // macOS may need up to 15 seconds to launch the desktop. This is separate
@@ -742,6 +754,7 @@ fn cancel_job_output(result: CancelJobResult) -> CancelJobOutput {
 fn error_code_name(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::AppNotRunning => "APP_NOT_RUNNING",
+        ErrorCode::AppUpdating => "APP_UPDATING",
         ErrorCode::AuthRequired => "AUTH_REQUIRED",
         ErrorCode::AuthExpired => "AUTH_EXPIRED",
         ErrorCode::ModelsNotReady => "MODELS_NOT_READY",
@@ -760,6 +773,12 @@ fn retry_status_action(message: &str) -> NextAction {
 
 fn error_output(error: IntegrationError, context: CallContext) -> ErrorOutput {
     let (retryable, outcome_unknown, recovery_action, suggested_tool) = match error.code {
+        ErrorCode::AppUpdating => (
+            true,
+            false,
+            "等待私匣完成更新并重新打开，然后重新连接 MCP、检查状态；不要反复启动应用或重新创建任务",
+            Some(retry_status_action("更新完成并重新连接 MCP 后检查状态")),
+        ),
         ErrorCode::AppNotRunning => (
             true,
             false,
@@ -977,6 +996,12 @@ fn current_user_sid() -> std::io::Result<String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A freshly spawned Windows sidecar must release its executable promptly.
+    #[cfg(windows)]
+    if integration_protocol::updating::active() {
+        eprintln!("私匣正在安装更新，请等待更新完成后重新连接 MCP");
+        return Ok(());
+    }
     let server = DesensitizationMcp::new(PipeClient::for_current_user()?);
     server.serve(stdio()).await?.waiting().await?;
     Ok(())
@@ -1297,6 +1322,7 @@ mod tests {
     fn every_error_code_has_a_safe_recovery_contract() {
         let expectations = [
             (ErrorCode::AppNotRunning, true, true),
+            (ErrorCode::AppUpdating, true, true),
             (ErrorCode::AuthRequired, true, true),
             (ErrorCode::AuthExpired, true, true),
             (ErrorCode::ModelsNotReady, true, true),

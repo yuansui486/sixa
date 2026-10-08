@@ -4,8 +4,8 @@ use crate::{
 use domain::{Error, Result, TaskOptions, TaskState};
 use integration_protocol::{
     CancelJobResult, CreateJobResult, DesensitizeBatchParams, DesensitizeFileParams, ErrorCode,
-    IntegrationError, JobParams, JobResult, JobState, MAX_FRAME_BYTES, Method,
-    PROTOCOL_VERSION, Request, Response, StatusResult, WaitJobParams,
+    IntegrationError, JobParams, JobResult, JobState, MAX_FRAME_BYTES, Method, PROTOCOL_VERSION,
+    Request, Response, StatusResult, WaitJobParams,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -152,7 +152,11 @@ pub struct IntegrationCheck {
 }
 
 fn mcp_executable_path() -> PathBuf {
-    let name = if cfg!(windows) { "sixa-mcp.exe" } else { "sixa-mcp" };
+    let name = if cfg!(windows) {
+        "sixa-mcp.exe"
+    } else {
+        "sixa-mcp"
+    };
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(name)))
@@ -193,10 +197,7 @@ pub async fn integration_check() -> IntegrationCheck {
         };
     }
     match tokio::time::timeout(Duration::from_secs(8), mcp_stdio_check(&executable)).await {
-        Ok(Ok(message)) => IntegrationCheck {
-            ok: true,
-            message,
-        },
+        Ok(Ok(message)) => IntegrationCheck { ok: true, message },
         Ok(Err(message)) => IntegrationCheck { ok: false, message },
         Err(_) => IntegrationCheck {
             ok: false,
@@ -432,8 +433,12 @@ async fn serve_macos(app: AppHandle) -> std::io::Result<()> {
     let slots = Arc::new(tokio::sync::Semaphore::new(16));
     loop {
         let (stream, _) = server.listener.accept().await?;
-        if check_peer(&stream).is_err() { continue; }
-        let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
+        if check_peer(&stream).is_err() {
+            continue;
+        }
+        let Ok(slot) = slots.clone().try_acquire_owned() else {
+            continue;
+        };
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let _slot = slot;
@@ -443,11 +448,10 @@ async fn serve_macos(app: AppHandle) -> std::io::Result<()> {
     }
 }
 
-async fn serve_client<S>(
-    app: AppHandle,
-    mut stream: S,
-) -> std::io::Result<()>
-where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
+async fn serve_client<S>(app: AppHandle, mut stream: S) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
         let size = stream.read_u32_le().await? as usize;
         if size == 0 || size > MAX_FRAME_BYTES {
@@ -474,6 +478,18 @@ where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
 
 async fn dispatch(app: AppHandle, request: Request) -> Response {
     let id = request.id.clone();
+    if app
+        .try_state::<crate::lifecycle::Lifecycle>()
+        .is_some_and(|state| state.updating())
+    {
+        return Response::failure(
+            id,
+            IntegrationError::new(
+                ErrorCode::AppUpdating,
+                "私匣正在安装更新，请等待完成后重新连接 MCP 并检查状态",
+            ),
+        );
+    }
     if request.validate().is_err() {
         return Response::failure(
             id,
@@ -894,11 +910,16 @@ fn validate_source(path: &Path) -> std::result::Result<PathBuf, IntegrationError
             "源文件必须使用绝对路径",
         ));
     }
-    let path = path
-        .canonicalize()
-        .map_err(|error| IntegrationError::new(ErrorCode::InvalidPath,
-            if error.kind() == std::io::ErrorKind::PermissionDenied { file_permission_hint() }
-            else { "源文件不存在或不可访问" }))?;
+    let path = path.canonicalize().map_err(|error| {
+        IntegrationError::new(
+            ErrorCode::InvalidPath,
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                file_permission_hint()
+            } else {
+                "源文件不存在或不可访问"
+            },
+        )
+    })?;
     if !path.is_file() {
         return Err(IntegrationError::new(
             ErrorCode::InvalidPath,
@@ -930,11 +951,16 @@ fn validate_output_dir(
             "输出目录必须使用绝对路径",
         ));
     }
-    let path = path
-        .canonicalize()
-        .map_err(|error| IntegrationError::new(ErrorCode::InvalidPath,
-            if error.kind() == std::io::ErrorKind::PermissionDenied { file_permission_hint() }
-            else { "输出目录不存在或不可访问" }))?;
+    let path = path.canonicalize().map_err(|error| {
+        IntegrationError::new(
+            ErrorCode::InvalidPath,
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                file_permission_hint()
+            } else {
+                "输出目录不存在或不可访问"
+            },
+        )
+    })?;
     if !path.is_dir() {
         return Err(IntegrationError::new(
             ErrorCode::InvalidPath,

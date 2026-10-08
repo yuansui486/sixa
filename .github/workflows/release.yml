@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的现有标签，例如 v1.0.4"
-        required: true
-        default: "v1.0.4"
+        description: "发布时填写现有标签，例如 v1.0.9；仅构建时可留空"
+        required: false
+        default: ""
       publish:
         description: "构建成功后发布 GitHub Release"
         required: true
@@ -35,19 +35,27 @@ jobs:
             target: x86_64-pc-windows-msvc
             bundle: nsis
             artifact: sixa-windows-x64
-            artifact_path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            artifact_path: |
+              target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+              target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
           - name: macOS Intel (DMG)
             os: macos-14
             target: x86_64-apple-darwin
             bundle: dmg
             artifact: sixa-macos-x64
-            artifact_path: target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            artifact_path: |
+              target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+              target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+              target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
           - name: macOS Apple Silicon (DMG)
             os: macos-14
             target: aarch64-apple-darwin
             bundle: dmg
             artifact: sixa-macos-arm64
-            artifact_path: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            artifact_path: |
+              target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+              target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+              target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -57,6 +65,8 @@ jobs:
     steps:
       - name: 检出源码
         uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.publish && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: 安装 Node.js
         uses: actions/setup-node@v5
@@ -89,6 +99,14 @@ jobs:
 
       - name: 安装前端依赖
         run: npm ci --prefix ui
+
+      - name: 核对发布版本与标签
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (inputs.publish && inputs.tag) || '' }}
+        run: node tools/release/check-version.mjs
+
+      - name: 更新协议与签名回归（离线）
+        run: node --test tools/release/manifest.test.mjs
 
       - name: 构建 Windows MCP sidecar
         if: runner.os == 'Windows'
@@ -145,6 +163,9 @@ jobs:
           node scripts/mcp-smoke.mjs --launch "target/${{ matrix.target }}/debug/sixa-mcp"
 
       - name: 构建安装程序
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: npx --prefix ui tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
 
       - name: 验证 Windows 安装器进程清理
@@ -204,6 +225,24 @@ jobs:
           trap - EXIT
           echo "SIXA_DMG_MOUNT=$mount_point" >> "$GITHUB_ENV"
 
+      - name: 验证 macOS 更新包与 DMG 内容一致
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$(find "target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          test -n "$archive" && test -s "$archive.sig"
+          unpacked="$RUNNER_TEMP/sixa-update-${{ matrix.target }}"
+          mkdir -p "$unpacked"
+          tar -xzf "$archive" -C "$unpacked"
+          app="$(find "$unpacked" -maxdepth 1 -name '*.app' -print -quit)"
+          dmg_app="$(find "$SIXA_DMG_MOUNT" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app" && test -n "$dmg_app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+          cmp "$app/Contents/MacOS/sixa" "$dmg_app/Contents/MacOS/sixa"
+          cmp "$app/Contents/MacOS/sixa-mcp" "$dmg_app/Contents/MacOS/sixa-mcp"
+          cmp "$app/Contents/Resources/libonnxruntime.dylib" "$dmg_app/Contents/Resources/libonnxruntime.dylib"
+
       - name: 验证 macOS 实际推理（离线微型模型）
         if: runner.os == 'macOS'
         timeout-minutes: 5
@@ -223,64 +262,65 @@ jobs:
           retention-days: 14
 
   release:
-    name: 发布 GitHub Release
+    name: 发布 GitHub Release 与 OSS 更新
     needs: build
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
     runs-on: ubuntu-latest
+    concurrency:
+      group: sixa-stable-oss
+      cancel-in-progress: false
     permissions:
       contents: write
 
     steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.publish && format('refs/tags/{0}', inputs.tag) || github.ref }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm ci --prefix tools/release
       - name: 下载全部安装程序
         uses: actions/download-artifact@v8
         with:
           path: release-assets
-          merge-multiple: true
+          merge-multiple: false
 
-      - name: 发布 Release
-        shell: bash
+      - name: 核对发布凭据
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          test -n "$OSS_ACCESS_KEY_ID" && test -n "$OSS_ACCESS_KEY_SECRET" || { echo "请先配置 OSS 发布凭据"; exit 1; }
+
+      - name: 校验签名并生成三平台更新清单
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          node tools/release/check-version.mjs
+          export RELEASE_DATE="$(git log -1 --format=%cI)"
+          node tools/release/manifest.mjs release-assets release-ready "${RELEASE_TAG#v}"
+
+      - name: 发布不可覆盖的 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
         run: |
-          version="${RELEASE_TAG#v}"
-          windows_installer="$(find release-assets -maxdepth 1 -type f -name '*.exe' -print -quit)"
-          macos_arm64="$(find release-assets -maxdepth 1 -type f -name '*aarch64.dmg' -print -quit)"
-          macos_x64="$(find release-assets -maxdepth 1 -type f -name '*x64.dmg' -print -quit)"
-          test -n "$windows_installer" && test -n "$macos_arm64" && test -n "$macos_x64"
-          mv "$windows_installer" "release-assets/Sixa_${version}_windows_x64_setup.exe"
-          mv "$macos_arm64" "release-assets/Sixa_${version}_macos_arm64.dmg"
-          mv "$macos_x64" "release-assets/Sixa_${version}_macos_x64.dmg"
-          (
-            cd release-assets
-            find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
-          ) > release-assets/SHA256SUMS.txt
-          cat > release-notes.md <<'EOF'
-          私匣是本机数据脱敏桌面应用。本次 Release 提供：
-
-          - Windows 10/11 x64 NSIS 安装程序
-          - macOS 11+ Intel DMG 安装程序
-          - macOS 11+ Apple Silicon DMG 安装程序
-
-          模型优先通过阿里云 OSS 北京公网地址下载，失败时自动切换到 ModelScope 备用源。两个来源共享断点，下载界面会显示当前来源、切换状态、百分比、已下载大小、实时速度和预计剩余时间。
-
-          macOS 登录状态和设备标识使用应用主密钥加密保存，避免登录校验和心跳反复弹出钥匙串授权。首次从旧版本升级时，应用会尝试一次性迁移旧凭据。
-
-          首次模型准备会区分下载、安装和内存加载阶段；可选的高精度 OCR 未安装时不再覆盖基础模型状态。
-
-          macOS 应用已进行完整性签名，但尚未使用 Apple Developer ID 签名和公证。首次打开时可能需要在“系统设置 → 隐私与安全性”中确认。macOS 安装包内含 ONNX Runtime 1.23.2 universal2 运行库。
-          EOF
+          set -euo pipefail
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
-              case "$asset" in
-                *.exe|*.dmg|SHA256SUMS.txt) gh release delete-asset "$RELEASE_TAG" "$asset" --yes ;;
-              esac
-            done
-            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            mkdir -p "$RUNNER_TEMP/sixa-release-check"
+            gh release download "$RELEASE_TAG" --pattern SHA256SUMS.txt --dir "$RUNNER_TEMP/sixa-release-check"
+            cmp release-ready/SHA256SUMS.txt "$RUNNER_TEMP/sixa-release-check/SHA256SUMS.txt"
           else
-            gh release create "$RELEASE_TAG" release-assets/* \
+            gh release create "$RELEASE_TAG" release-ready/* \
               --title "私匣 $RELEASE_TAG" \
-              --notes-file release-notes.md \
-              --latest
+              --notes-file "docs/releases/${RELEASE_TAG#v}.md" --latest
           fi
+
+      - name: 上传 OSS 并最后更新稳定版本清单
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: node tools/release/publish.mjs release-ready

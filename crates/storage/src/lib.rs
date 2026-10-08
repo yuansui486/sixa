@@ -378,6 +378,16 @@ impl Store {
         let settings = settings.validate()?;
         self.put("settings", "app", &settings)
     }
+    pub fn update_preferences(&self) -> Result<domain::UpdatePreferences> {
+        Ok(self
+            .config("app_updates")?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
+    }
+    pub fn save_update_preferences(&self, value: &domain::UpdatePreferences) -> Result<()> {
+        self.put("app_updates", "app", value)
+    }
     pub fn delete_rule(&self, id: Uuid) -> Result<()> {
         self.db
             .execute(

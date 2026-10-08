@@ -152,6 +152,12 @@ try {
     Assert-Tools $installed
     Passed 'silent upgrade releases legacy MCP and installs an executable with a valid MCP handshake'
 
+    Assert-True ((Wait-Exit (Start-Hidden $installer ('/P /UPDATE /D=' + $directory))) -eq 0) 'Passive updater installation failed'
+    Assert-True ($installed.WaitForExit(2000)) 'Passive updater left MCP running'
+    $installed = Start-Mcp $directory
+    Assert-Tools $installed
+    Passed 'passive /UPDATE installation releases MCP and the installed sidecar reconnects'
+
     if ($TauriNsisDirectory) {
         # Reuse a real executable as a harmless stand-in for the main program.
         # It never launches a GUI, reads app data, or connects to the auth backend.
@@ -176,6 +182,7 @@ try {
     $lock = [IO.File]::Open($exe, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     try {
         Assert-True ((Wait-Exit (Start-Hidden $installer ('/S /D=' + $directory))) -eq 10) 'Locked executable did not fail silent installation'
+        Assert-True ((Wait-Exit (Start-Hidden $installer ('/P /UPDATE /D=' + $directory))) -eq 10) 'Locked executable did not fail passive updater installation'
         Assert-True (-not [IO.File]::Exists((Join-Path $directory 'installed.txt'))) 'Install continued after cleanup failure'
     } finally { $lock.Dispose() }
     Assert-True ((Wait-Exit (Start-Hidden $installer ('/S /D=' + $directory))) -eq 0) 'Retry after release failed'

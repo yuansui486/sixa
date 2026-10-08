@@ -250,7 +250,7 @@ export function Lifecycle() {
           {(request.active_tasks > 0 || request.active_downloads > 0) && (
             <p className="muted">
               当前有 {request.active_tasks} 个处理任务、
-              {request.active_downloads} 个模型下载。
+              {request.active_downloads} 个下载。
             </p>
           )}
           <label className="close-remember">
@@ -279,7 +279,7 @@ export function Lifecycle() {
       ) : request.phase === "confirm" ? (
         <p>
           当前有 {request.active_tasks} 个处理任务、{request.active_downloads}{" "}
-          个模型下载。退出将停止这些操作，已生成的文件会保留。
+          个下载。退出将停止这些操作，已生成的文件会保留。
         </p>
       ) : (
         <p className="close-progress">

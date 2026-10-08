@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.95.0'
+          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: 配置 Windows 编译环境
@@ -51,6 +51,9 @@ jobs:
         if: runner.os == 'macOS'
         with:
           node-version: 22
+      - name: 验证离线更新清单与签名
+        if: runner.os == 'macOS'
+        run: node --test tools/release/manifest.test.mjs
       - name: 构建 macOS 本机 MCP 测试程序
         if: runner.os == 'macOS'
         env:

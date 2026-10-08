@@ -168,6 +168,48 @@ test.beforeEach(async ({ page }) => {
       },
       auth_logout: () => undefined,
       get_desktop_preferences: () => desktopPreferences,
+      get_app_update_status: () => ({
+        revision: 1,
+        current_version: "1.0.9",
+        version: null,
+        notes: null,
+        phase: "idle",
+        automatic: true,
+        last_check: 0,
+        downloaded: 0,
+        total: null,
+        bytes_per_second: 0,
+        eta_seconds: null,
+        error: null,
+      }),
+      check_app_update: () => ({
+        revision: 2,
+        current_version: "1.0.9",
+        version: "1.0.10",
+        notes: "改进文档预览",
+        phase: "available",
+        automatic: true,
+        last_check: 1,
+        downloaded: 0,
+        total: null,
+        bytes_per_second: 0,
+        eta_seconds: null,
+        error: null,
+      }),
+      download_app_update: () => ({
+        revision: 3,
+        current_version: "1.0.9",
+        version: "1.0.10",
+        notes: "改进文档预览",
+        phase: "downloading",
+        automatic: true,
+        last_check: 1,
+        downloaded: 1024 * 1024,
+        total: 2 * 1024 * 1024,
+        bytes_per_second: 1024 * 1024,
+        eta_seconds: 1,
+        error: null,
+      }),
       set_desktop_preferences: ({ closeBehavior }) => {
         desktopPreferences = {
           ...desktopPreferences,
@@ -272,7 +314,8 @@ test.beforeEach(async ({ page }) => {
         authenticated: true,
         models_ready: true,
         executable_path:
-          window.__mcp_path__ ?? "C:\\Users\\tester\\AppData\\Local\\私匣\\sixa-mcp.exe",
+          window.__mcp_path__ ??
+          "C:\\Users\\tester\\AppData\\Local\\私匣\\sixa-mcp.exe",
         protocol_version: "1",
         supported_formats: ["TXT", "PDF", "DOCX", "XLSX", "PPTX", "PNG", "JPG"],
       }),
@@ -768,6 +811,40 @@ test("真实 DOCX 排版同时显示文字和图片，实体定位与图片复�
   await expectNoHorizontalOverflow(page);
 });
 
+test("登录前可检查更新，确认后才下载并展示速度", async ({ page }, testInfo) => {
+  await page.addInitScript(() => {
+    window.__auth_status__ = {
+      authenticated: false,
+      offline: false,
+      offline_until: null,
+      subject: null,
+      policy: null,
+      reason: null,
+    };
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "检查更新" }).click();
+  const dialog = page.getByRole("dialog", { name: "应用更新" });
+  await expect(dialog.getByText("改进文档预览")).toBeVisible();
+  expect(
+    await page.evaluate(() => window.__mock__.calls.download_app_update ?? 0),
+  ).toBe(0);
+  await dialog.getByRole("button", { name: "下载更新" }).click();
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute(
+    "value",
+    "1048576",
+  );
+  await expect(dialog.getByText(/50%.*MB\/s/)).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "取消下载" })).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("application-update.png"),
+  });
+  await dialog.getByRole("button", { name: "后台下载" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByPlaceholder("请输入租户编码")).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+});
+
 test("租户用户登录后进入工作台", async ({ page }) => {
   await page.addInitScript(() => {
     window.__auth_status__ = {
@@ -992,13 +1069,13 @@ test("AI 工具接入展示状态、复制配置并完成本机自检", async ({
     page.getByRole("heading", { name: "AI 工具接入" }),
   ).toBeVisible();
   await expect(page.getByText("默认开启", { exact: true })).toBeVisible();
-  await expect(
-    page.getByText("已登录", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText("已登录", { exact: true })).toBeVisible();
   await expect(
     page.getByText("已随桌面应用安装", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("已安装，处理时按需加载", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("已安装，处理时按需加载", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByLabel("通用 MCP JSON 配置")).toContainText('"sixa"');
   await expect(
     page.getByText("只向 AI 返回任务状态与结果路径", { exact: false }),
@@ -1025,12 +1102,20 @@ test("AI 工具接入展示状态、复制配置并完成本机自检", async ({
 
 test("Mac MCP 配置保留中文空格路径并说明自动启动", async ({ page }) => {
   const path = "/Users/test/Applications/私匣 测试.app/Contents/MacOS/sixa-mcp";
-  await page.addInitScript((value) => { window.__mcp_path__ = value; }, path);
+  await page.addInitScript((value) => {
+    window.__mcp_path__ = value;
+  }, path);
   await page.goto("/#/integration");
-  await expect(page.getByText("Mac 首次调用会自动打开私匣", { exact: false })).toBeVisible();
+  await expect(
+    page.getByText("Mac 首次调用会自动打开私匣", { exact: false }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "复制配置" }).click();
-  await expect.poll(() => page.evaluate(() => window.__copied_text__)).toBeTruthy();
-  const config = JSON.parse((await page.evaluate(() => window.__copied_text__))!);
+  await expect
+    .poll(() => page.evaluate(() => window.__copied_text__))
+    .toBeTruthy();
+  const config = JSON.parse(
+    (await page.evaluate(() => window.__copied_text__))!,
+  );
   expect(config.mcpServers.sixa).toEqual({ command: path, args: ["serve"] });
   await expectNoHorizontalOverflow(page);
 });

@@ -11,6 +11,7 @@ mod lifecycle;
 mod preview_jobs;
 mod runtime;
 mod scheduler;
+mod updates;
 
 use domain::{
     AppSettings, Error, Policy, PreviewDto, RegionDto, Result, Rule, Selection, TaskMeta,
@@ -1179,6 +1180,7 @@ fn main() {
             lifecycle::restore(app);
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let test_mode = desktop_test_root.is_some();
             let root = desktop_test_root
@@ -1190,6 +1192,11 @@ fn main() {
                 storage::credential_key()?
             };
             let store = storage::Store::open(&root, key.clone())?;
+            integration_protocol::updating::finish_startup(&root, env!("CARGO_PKG_VERSION"));
+            app.manage(updates::Updates::new(
+                storage::Store::connect(&root, key.clone())?,
+                &root,
+            )?);
             let concurrency = store.settings()?.concurrency;
             app.manage(lifecycle::Lifecycle::new(storage::Store::connect(
                 &root,
@@ -1242,7 +1249,7 @@ fn main() {
                     .https_only(true)
                     .connect_timeout(std::time::Duration::from_secs(15))
                     .timeout(std::time::Duration::from_secs(30 * 60))
-                    .user_agent("Sixa/1.0.8")
+                    .user_agent(concat!("Sixa/", env!("CARGO_PKG_VERSION")))
                     .build()
                     .map_err(|error| error.to_string())?,
                 integration_jobs: integration::JobRegistry::default(),
@@ -1250,6 +1257,7 @@ fn main() {
             lifecycle::install_tray(app.handle());
             if !test_mode {
                 integration::start(app.handle().clone())?;
+                updates::start(app.handle().clone());
             }
             #[cfg(all(debug_assertions, target_os = "macos"))]
             if test_mode && std::env::var_os("SIXA_MCP_TEST_DIRECTORY").is_some() {
@@ -1310,6 +1318,12 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            updates::get_app_update_status,
+            updates::set_app_update_preferences,
+            updates::check_app_update,
+            updates::download_app_update,
+            updates::cancel_app_update,
+            updates::install_app_update,
             lifecycle::get_desktop_preferences,
             lifecycle::set_desktop_preferences,
             lifecycle::get_close_request,
