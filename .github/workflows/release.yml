@@ -85,6 +85,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.target }}
+          cache-on-failure: true
 
       - name: 配置 Windows 构建环境
         if: runner.os == 'Windows'

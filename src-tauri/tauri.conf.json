@@ -4,9 +4,9 @@
   "version": "1.0.9",
   "identifier": "cn.shierkeji.sixa",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": { "script": "npm run dev", "cwd": "../ui" },
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": { "script": "npm run build", "cwd": "../ui" },
     "frontendDist": "../ui/dist"
   },
   "app": {
