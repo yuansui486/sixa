@@ -108,6 +108,15 @@ jobs:
       - name: 更新协议与签名回归（离线）
         run: node --test tools/release/manifest.test.mjs
 
+      - name: 桌面更新、保存与 MCP 回归（离线）
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
+        run: cargo test --locked -p sixa -p storage -p integration-protocol -p sixa-mcp --target ${{ matrix.target }}
+
+      - name: 界面单元测试
+        if: runner.os == 'Windows'
+        run: npm --prefix ui test
+
       - name: 构建 Windows MCP sidecar
         if: runner.os == 'Windows'
         shell: pwsh
