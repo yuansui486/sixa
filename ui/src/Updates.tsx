@@ -54,7 +54,7 @@ export function UpdateEntry({ settings = false }: { settings?: boolean }) {
     <section className={settings ? "card settings-section" : "update-entry"}>
       {settings && <h2>版本与更新</h2>}
       <div className="update-entry-line">
-        <span>私匣 {status?.current_version ?? "1.0.9"}</span>
+        <span>私匣 {status?.current_version ?? ""}</span>
         <button
           type="button"
           className="secondary"
@@ -180,7 +180,7 @@ export function Updates() {
       >
         <h2 id="update-title">应用更新</h2>
         <p className="muted">
-          当前版本 {status?.current_version ?? "1.0.9"}
+          当前版本 {status?.current_version ?? "读取中…"}
           {status?.version ? ` → ${status.version}` : ""}
         </p>
         <p className="update-phase" role="status">
