@@ -41,7 +41,7 @@ jobs:
           - name: macOS Intel (DMG)
             os: macos-14
             target: x86_64-apple-darwin
-            bundle: dmg
+            bundle: app,dmg
             artifact: sixa-macos-x64
             artifact_path: |
               target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
@@ -50,7 +50,7 @@ jobs:
           - name: macOS Apple Silicon (DMG)
             os: macos-14
             target: aarch64-apple-darwin
-            bundle: dmg
+            bundle: app,dmg
             artifact: sixa-macos-arm64
             artifact_path: |
               target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
