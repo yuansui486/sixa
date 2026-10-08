@@ -118,9 +118,41 @@ impl Updates {
     }
 }
 fn error(value: impl std::fmt::Display) -> Error {
-    Error::Io(format!(
-        "应用更新失败：{value}。请检查网络、磁盘空间或目录权限后重试"
-    ))
+    let raw = value.to_string();
+    let lower = raw.to_lowercase();
+    let contains = |words: &[&str]| words.iter().any(|word| lower.contains(word));
+    let advice = if contains(&["signature", "minisign", "pubkey", "public key"]) {
+        "更新包签名校验失败，请重新下载；若仍失败，请联系维护人员"
+    } else if contains(&[
+        "permission",
+        "denied",
+        "access is",
+        "os error 5",
+        "os error 13",
+    ]) {
+        "无法写入安装目录，请检查目录权限或安全软件拦截后重试"
+    } else if contains(&["no space", "disk full", "os error 112", "os error 28"]) {
+        "磁盘空间不足，请释放空间后重试"
+    } else if contains(&["target", "platform"]) {
+        "没有适用于当前系统或芯片的更新包，请联系维护人员"
+    } else if contains(&[
+        "network",
+        "request",
+        "status",
+        "timeout",
+        "timed out",
+        "connection",
+        "dns",
+        "tls",
+        "redirect",
+    ]) {
+        "暂时无法获取更新，请检查网络后重试"
+    } else {
+        "应用更新未完成，请重试；若仍失败，请联系维护人员"
+    };
+    // Keep bounded diagnostics instead of masking every failure as a network error.
+    let detail: String = raw.chars().take(360).collect();
+    Error::Io(format!("{advice}。详细信息：{detail}"))
 }
 fn snapshot(state: &Updates) -> Result<Status> {
     Ok(state.inner.lock().map_err(poisoned)?.status.clone())
@@ -685,6 +717,21 @@ mod tests {
     #[test]
     fn malformed_signature_never_reaches_installer() {
         assert!(verify(b"package", "invalid", &public_key()).is_err());
+    }
+    #[test]
+    fn update_errors_keep_actionable_advice_and_bounded_diagnostics() {
+        for (raw, advice) in [
+            ("Minisign signature mismatch", "签名校验失败"),
+            ("HTTP status 404", "检查网络"),
+            ("TargetNotFound: darwin-aarch64", "系统或芯片"),
+            ("Access is denied (os error 5)", "安装目录"),
+            ("No space left on device", "磁盘空间不足"),
+        ] {
+            let message = error(raw).to_string();
+            assert!(message.contains(advice));
+            assert!(message.contains(raw));
+        }
+        assert!(error("长".repeat(1000)).to_string().chars().count() < 450);
     }
     #[test]
     fn signed_package_and_cached_file_tampering_are_verified() {

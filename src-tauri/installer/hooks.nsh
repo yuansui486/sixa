@@ -49,12 +49,12 @@ FunctionEnd
 !macro NSIS_HOOK_PREINSTALL
   ; Stop the desktop first so its connection self-test cannot start another MCP.
   ; Tauri repeats this check afterwards; no process remains in the normal case.
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Call SixaStopMcp
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Call un.SixaStopMcp
 !macroend
 !endif

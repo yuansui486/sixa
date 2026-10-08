@@ -6,13 +6,15 @@
 
 私匣使用 Smart Ops 租户用户登录，租户需单独开通“本地数据脱敏”模块。设备会话每 10 分钟在线校验一次，网络中断后可继续使用最近一次签发的 24 小时离线租约。账号、租户和设备授权通过 HTTPS 校验；待处理文件、识别内容、任务历史和规则不会发送到认证服务器。会话令牌保存在 Windows Credential Manager 或 macOS Keychain，不进入 WebView 或浏览器存储。
 
-Windows 安装包附带通用 MCP stdio 服务，供本机 AI 工具异步创建、查询、等待和取消脱敏任务。桌面应用必须保持运行并已登录；MCP 通过当前 Windows 用户专属的命名管道通信，不开放 HTTP 端口，也不修改 `PATH`。外部调用使用桌面中现有规则和脱敏方式，只返回任务状态、计数及输出路径，不返回正文或实体值。macOS 当前不提供 MCP sidecar。配置和工具说明见 [AI 工具接入](docs/ai-mcp-integration.md)。
+Windows 和 macOS 安装包均附带 MCP stdio 服务，供本机 AI 工具异步创建、查询、等待和取消脱敏任务。桌面应用需已登录；Windows 通过当前用户专属命名管道通信，macOS 通过当前用户的本地 socket 通信，并支持按需启动桌面应用。不开放 HTTP 端口，也不修改 `PATH`。外部调用使用桌面中现有规则和脱敏方式，只返回任务状态、计数及输出路径，不返回正文或实体值。配置和工具说明见 [AI 工具接入](docs/ai-mcp-integration.md)。
 
 首次启动自动安装 RaNER 与轻量 PP-OCRv4；高精度 OCR 可在模型管理页按需安装。模型优先从北京地域的阿里云 OSS 公网地址下载，连接或续传失败时自动切换到固定版本的 [ModelScope 备用仓库](https://www.modelscope.cn/models/yuansui486/data_desensitization_0918/tags/desktop-models-v1.0.0)。两个来源共享断点文件，切换来源不会从头开始；最终安装包及解压结果仍执行 SHA-256 校验。后续启动只检查清单和必需文件。第一套模型加载后工作台即可使用，其他 worker 在后台预热，预热完成前只调度已就绪的 worker。模型页会显示当前下载源、速度、剩余时间和自动切换状态，并提供手动完整校验和确认后清空单个模型目录再下载的“重建模型”。文件内容损坏可能在加载时才报错；对应分析会被阻止。桌面数据继续保存在兼容目录 `%LOCALAPPDATA%\LocalDesensitization\`，升级到私匣后不会重复下载模型或丢失现有任务。
 
 ## 构建和验证
 
 从 1.0.9 起支持应用内更新：每天自动检查，确认后从阿里云 OSS 下载，保存修改后重启安装。首次接入、OSS 目录和后续发布步骤见 [应用更新与发布](docs/automatic-updates.md)。
+
+其他桌面产品的接入步骤、代码位置和灵雀适配说明见 [桌面应用接入 OSS 自动更新](docs/desktop-auto-update-integration.md)。
 
 需要 Rust 1.95+、Node.js 和对应平台的 Tauri v2 编译工具链。Windows 本地依次执行：
 

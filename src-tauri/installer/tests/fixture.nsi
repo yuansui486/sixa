@@ -14,6 +14,7 @@ OutFile "${OUTPUT}"
   LoadLanguageFile "${NSISDIR}\Contrib\Language files\SimpChinese.nlf"
   !include "${TAURI_NSIS_DIR}\SimpChinese.nsh"
   !include "${TAURI_NSIS_DIR}\utils.nsh"
+  !include "Win\RestartManager.nsh"
   !addplugindir "${TAURI_PLUGIN_DIR}"
 !else
   !macro CheckIfAppIsRunning NAME PRODUCT
@@ -34,11 +35,23 @@ FunctionEnd
 Function un.onInit
   StrCpy $PassiveMode 0
 FunctionEnd
+Function .onInstSuccess
+  ; Mirror the official updater's /P /UPDATE /R restart contract.
+  ClearErrors
+  ${GetOptions} $CMDLINE "/R" $0
+  ${IfNot} ${Errors}
+    Exec '"$INSTDIR\${MAINBINARYNAME}.exe"'
+  ${EndIf}
+FunctionEnd
 Section Install
   !insertmacro NSIS_HOOK_PREINSTALL
   SetOutPath "$INSTDIR"
   File /oname=sixa-mcp.exe "${MCP_BINARY}"
-  File /oname=${MAINBINARYNAME}.exe "${MCP_BINARY}"
+  !ifdef MAIN_BINARY
+    File /oname=${MAINBINARYNAME}.exe "${MAIN_BINARY}"
+  !else
+    File /oname=${MAINBINARYNAME}.exe "${MCP_BINARY}"
+  !endif
   WriteUninstaller "$INSTDIR\uninstall.exe"
   FileOpen $0 "$INSTDIR\installed.txt" w
   FileWrite $0 "installed"

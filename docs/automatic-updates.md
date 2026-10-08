@@ -1,5 +1,7 @@
 # 私匣应用更新与发布
 
+其他产品（包括灵雀）的代码接入、安装协调和验收流程见 [桌面应用接入 OSS 自动更新](desktop-auto-update-integration.md)。本文用于私匣自身的日常发版。
+
 从 1.0.9 开始使用 Tauri v2 更新器。Windows x64 使用 NSIS；Mac Intel、Apple Silicon 使用各自的 `.app.tar.gz` 更新包。DMG 仍供首次安装使用，应用内更新不需要用户解压或拖拽。
 
 ## 用户操作

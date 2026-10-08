@@ -118,6 +118,12 @@ jobs:
         if: runner.os == 'Windows'
         run: npm --prefix ui test
 
+      - name: 构建 Windows 官方更新器验收程序
+        if: runner.os == 'Windows'
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
+        run: cargo build --locked -p sixa --example updater-install-probe --target ${{ matrix.target }}
+
       - name: 构建 Windows MCP sidecar
         if: runner.os == 'Windows'
         shell: pwsh
@@ -185,7 +191,8 @@ jobs:
           & src-tauri/installer/tests/run.ps1 `
             -McpExecutable "target/${{ matrix.target }}/release/sixa-mcp.exe" `
             -MakeNsis "$env:LOCALAPPDATA\tauri\NSIS\makensis.exe" `
-            -TauriNsisDirectory "target/${{ matrix.target }}/release/nsis/x64"
+            -TauriNsisDirectory "target/${{ matrix.target }}/release/nsis/x64" `
+            -NativeUpdaterProbe "target/${{ matrix.target }}/debug/examples/updater-install-probe.exe"
 
       - name: 验证 macOS 安装包和应用签名
         if: runner.os == 'macOS'

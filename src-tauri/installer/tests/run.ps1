@@ -3,7 +3,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$McpExecutable,
     [Parameter(Mandatory = $true)][string]$MakeNsis,
-    [string]$TauriNsisDirectory
+    [string]$TauriNsisDirectory,
+    [string]$NativeUpdaterProbe
 )
 $ErrorActionPreference = 'Stop'
 $root = Join-Path ([IO.Path]::GetTempPath()) ('sixa-installer-test-' + [Guid]::NewGuid().ToString('N'))
@@ -187,6 +188,43 @@ try {
     } finally { $lock.Dispose() }
     Assert-True ((Wait-Exit (Start-Hidden $installer ('/S /D=' + $directory))) -eq 0) 'Retry after release failed'
     Passed 'persistent lock fails silent installation; installation succeeds after releasing the lock'
+    if ($NativeUpdaterProbe) {
+        $NativeUpdaterProbe = (Resolve-Path -LiteralPath $NativeUpdaterProbe).Path
+        $nativeDirectory = Join-Path $root ('native update ' + [char]0x4e2d + [char]0x6587)
+        Copy-Mcp $nativeDirectory
+        $nativeMcp = Start-Mcp $nativeDirectory
+        $versionMain = Join-Path $root 'new-version.exe'
+        Add-Type -OutputType ConsoleApplication -OutputAssembly $versionMain -TypeDefinition @'
+using System;
+using System.IO;
+using System.Reflection;
+[assembly: AssemblyVersion("9.0.0.0")]
+class UpdatedFixture {
+    static void Main() {
+        File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "restarted.txt"), "SIXA_UPDATED_9.0.0");
+    }
+}
+'@
+        $nativeInstaller = Join-Path $root 'native-setup.exe'
+        $nativeDefines = @("/DMCP_BINARY=$McpExecutable", "/DMAIN_BINARY=$versionMain", "/DOUTPUT=$nativeInstaller")
+        if ($TauriNsisDirectory) {
+            $nativeDefines += @("/DTAURI_NSIS_DIR=$TauriNsisDirectory", "/DTAURI_PLUGIN_DIR=$pluginDir")
+            Copy-Item -LiteralPath $McpExecutable -Destination (Join-Path $nativeDirectory 'sixa-installer-regression.exe')
+            $nativeMain = Start-Hidden (Join-Path $nativeDirectory 'sixa-installer-regression.exe') 'serve'
+        }
+        & $MakeNsis '/V2' '/WX' @nativeDefines (Join-Path $PSScriptRoot 'fixture.nsi')
+        Assert-True ($LASTEXITCODE -eq 0) 'Native updater fixture failed to compile'
+        & node (Join-Path $PSScriptRoot '../../../scripts/updater-windows-smoke.mjs') $NativeUpdaterProbe $nativeInstaller $root
+        Assert-True ($LASTEXITCODE -eq 0) 'Native updater installation/restart failed'
+        Assert-True ($nativeMcp.WaitForExit(2000)) 'Native updater left old MCP running'
+        if ($TauriNsisDirectory) { Assert-True ($nativeMain.WaitForExit(2000)) 'Native updater left old desktop running' }
+        Assert-True ((Get-FileHash -LiteralPath (Join-Path $nativeDirectory 'sixa-installer-regression.exe')).Hash -eq (Get-FileHash -LiteralPath $versionMain).Hash) 'Native updater did not replace executable'
+        $installedNativeMcp = Start-Mcp $nativeDirectory
+        Assert-Tools $installedNativeMcp
+        $installedNativeMcp.Kill()
+        $installedNativeMcp.WaitForExit()
+        Passed 'official updater installs and restarts the new executable; MCP reconnects and external data survives'
+    }
     Write-Host "$checks installer regression groups passed"
 } finally {
     foreach ($process in $children) {
