@@ -84,6 +84,7 @@ import { Settings } from "./Settings";
 import { Lifecycle } from "./Lifecycle";
 import { Updates, UpdateEntry } from "./Updates";
 import { Tasks } from "./History";
+import { Files, FileSaveNotice } from "./Files";
 import { useJobs } from "./jobs";
 import sixaMark from "./assets/sixa-mark.svg";
 import {
@@ -478,7 +479,11 @@ function App({
         total?: number;
         terminal?: boolean;
       }>("batch-progress", ({ payload }) => updateActivity(payload, true)),
+      listen("files-updated", () => {
+        client.invalidateQueries({ queryKey: ["output-files"] });
+      }),
       listen<TaskMeta>("task-updated", () => {
+        client.invalidateQueries({ queryKey: ["output-files"] });
         client.invalidateQueries({ queryKey: ["tasks"] });
         client.invalidateQueries({ queryKey: ["batch"] });
       }),
@@ -565,6 +570,7 @@ function App({
           {[
             ["/", FileText, "脱敏工作台"],
             ["/batch", FolderOpen, "批量处理"],
+            ["/files", FolderOpen, "文件管理"],
             ["/history", History, "任务历史"],
             ["/rules", ScanSearch, "识别规则"],
             ["/policies", SlidersHorizontal, "脱敏方式"],
@@ -736,6 +742,7 @@ function App({
           <Routes>
             <Route path="/" element={<Workbench />} />
             <Route path="/history" element={<Tasks />} />
+            <Route path="/files" element={<Files />} />
             <Route path="/batch" element={<Batch />} />
             <Route path="/rules" element={<Rules />} />
             <Route path="/policies" element={<Policies />} />
@@ -817,7 +824,7 @@ function Integration() {
   const action = useAction();
   const info = integration.data;
   const configuration =
-    info?.enabled && info.executable_path
+    info?.enabled && info.mcp_available && info.executable_path
       ? JSON.stringify(
           {
             mcpServers: {
@@ -896,6 +903,19 @@ function Integration() {
                 }
               />
             </div>
+            {!info.mcp_available && (
+              <p className="error" role="alert">
+                未找到随应用安装的 MCP 程序。Mac
+                请将完整的私匣应用拖入“应用程序”后重新打开；如果仍然缺失，请安装最新版完整安装包，然后重新检测。
+              </p>
+            )}
+            <button
+              className="text-action"
+              disabled={integration.isFetching}
+              onClick={() => void integration.refetch()}
+            >
+              重新检测安装
+            </button>
             <button
               type="button"
               className="secondary"
@@ -933,7 +953,7 @@ function Integration() {
                 复制配置
               </button>
             </div>
-            {info.enabled ? (
+            {configuration ? (
               <>
                 <p>
                   私匣在本机脱敏 PDF、Office、图片和文本文件，只向 AI
@@ -949,7 +969,11 @@ function Integration() {
                 </pre>
               </>
             ) : (
-              <p>当前平台暂不提供 MCP，请使用 Windows 或 macOS 安装包。</p>
+              <p>
+                {info.enabled
+                  ? "安装程序恢复正常后，这里会显示可用的 MCP 配置。"
+                  : "当前版本未提供此平台的 MCP，请安装最新版 Windows 或 macOS 完整安装包。"}
+              </p>
             )}
           </section>
 
@@ -959,6 +983,10 @@ function Integration() {
           >
             <h2 id="integration-details-title">程序信息</h2>
             <dl>
+              <dt>应用版本 / 平台</dt>
+              <dd>
+                {info.app_version ?? "旧版本"} / {info.platform ?? "未知"}
+              </dd>
               <dt>MCP 程序路径</dt>
               <dd>
                 <code>{info.executable_path || "当前平台未提供"}</code>
@@ -984,6 +1012,28 @@ function Integration() {
                   : "当前平台暂不提供 MCP 调用"}
               </dd>
             </dl>
+            <button
+              className="secondary"
+              onClick={() =>
+                void copy(
+                  JSON.stringify(
+                    {
+                      version: info.app_version,
+                      platform: info.platform,
+                      enabled: info.enabled,
+                      mcp_available: info.mcp_available,
+                      executable_path: info.executable_path,
+                      protocol_version: info.protocol_version,
+                    },
+                    null,
+                    2,
+                  ),
+                  "接入诊断信息",
+                )
+              }
+            >
+              复制接入诊断信息
+            </button>
           </section>
         </div>
       ) : null}
@@ -2521,6 +2571,9 @@ function Workbench() {
             重试保存
           </button>
         </p>
+      )}
+      {task.meta.state === "completed" && (
+        <FileSaveNotice taskId={task.meta.id} />
       )}
       {exportedPath && (
         <div className="export-notice" role="status">

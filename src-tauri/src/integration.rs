@@ -18,7 +18,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 #[cfg(windows)]
@@ -136,6 +136,8 @@ impl JobRegistry {
 
 #[derive(Serialize)]
 pub struct IntegrationInfo {
+    app_version: &'static str,
+    platform: &'static str,
     enabled: bool,
     mcp_available: bool,
     authenticated: bool,
@@ -167,6 +169,8 @@ fn mcp_executable_path() -> PathBuf {
 pub fn integration_info(state: State<'_, AppState>) -> IntegrationInfo {
     let executable = mcp_executable_path();
     IntegrationInfo {
+        app_version: env!("CARGO_PKG_VERSION"),
+        platform: std::env::consts::OS,
         enabled: true,
         mcp_available: executable.is_file(),
         authenticated: state.auth.require_authenticated().is_ok(),
@@ -711,6 +715,13 @@ async fn run_file_inner(
     state.integration_jobs.update(id, |snapshot| {
         snapshot.result.output_paths = vec![output_path.clone()];
     });
+    let recorded_path = output_path.clone();
+    work(state.clone(), move |engine| {
+        engine.record_export(id, &recorded_path, "mcp").map(|_| ())
+    })
+    .await
+    .map_err(map_error)?;
+    let _ = app.emit("files-updated", ());
     let report_path = write_report(
         output_dir,
         source
@@ -860,6 +871,13 @@ async fn run_batch_inner(
     state.integration_jobs.update(id, |snapshot| {
         snapshot.result.output_paths = vec![output_path.clone()];
     });
+    let recorded_path = output_path.clone();
+    work(state.clone(), move |engine| {
+        engine.record_export(id, &recorded_path, "mcp").map(|_| ())
+    })
+    .await
+    .map_err(map_error)?;
+    let _ = app.emit("files-updated", ());
     let report_path = write_report(
         output_dir,
         "批量",

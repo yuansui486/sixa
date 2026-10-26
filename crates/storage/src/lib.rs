@@ -1,3 +1,4 @@
+pub mod files;
 pub mod vault;
 use domain::{AppSettings, Error, ErrorInfo, Policy, Result, Rule, TaskMeta};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -6,7 +7,7 @@ use std::time::Duration;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TaskQuery {
@@ -447,6 +448,11 @@ fn migrate_database(db: &mut Connection) -> Result<()> {
                  CREATE INDEX tasks_history_state ON tasks(parent_batch_id,state,created_at DESC,id DESC);
                  CREATE INDEX tasks_active_state ON tasks(state);"
             ).map_err(db_err)?,
+            3 => transaction.execute_batch(
+                "CREATE TABLE outputs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, auto_key TEXT UNIQUE, data TEXT NOT NULL);
+                 CREATE INDEX outputs_task ON outputs(task_id);
+                 CREATE INDEX outputs_date ON outputs(json_extract(data,'$.created_at') DESC, id DESC);"
+            ).map_err(db_err)?,
             _ => return Err(Error::Invalid(format!("没有数据库版本 {current} 的迁移"))),
         }
         current += 1;
@@ -648,7 +654,7 @@ mod tests {
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            3
+            SCHEMA_VERSION
         );
     }
     #[test]

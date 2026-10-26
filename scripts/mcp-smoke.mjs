@@ -1,6 +1,6 @@
 // Offline MCP protocol and native desktop smoke checks. Never install models or log in.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, mkdir, rm, writeFile, copyFile, readFile, chmod } from 'node:fs/promises';
 import { createConnection } from 'node:net';
@@ -91,12 +91,34 @@ async function client(executable, env = process.env) {
 
 let root;
 const launchedHosts = [];
+let packagedExecutable;
 try {
   const [mode, executable, sidecar] = process.argv.slice(2);
   if (mode === '--metadata') {
     const mcp = await client(executable);
     await mcp.close();
     console.log('PASS packaged MCP initialization, Chinese metadata, six tools, clean exit');
+  } else if (mode === '--packaged' && process.platform === 'darwin') {
+    assert.equal(process.env.CI, 'true', 'Packaged smoke uses an ephemeral CI user only');
+    packagedExecutable = resolve(executable);
+    const mcp = await client(sidecar);
+    // The release sidecar must launch its own signed application bundle through LaunchServices.
+    const status = await mcp.call('desensitization_status');
+    assert.equal(status.isError ?? false, false, JSON.stringify(status.structuredContent));
+    assert.equal(status.structuredContent.authenticated, false);
+    assert.equal(status.structuredContent.models_ready, false);
+    assert.equal(status.structuredContent.ready, false);
+    root = await mkdtemp('/private/tmp/sixa-package-');
+    const source = join(root, '中文 文件.txt');
+    await writeFile(source, 'offline authorization check');
+    const rejected = await mcp.call('desensitize_file', { source_path: source });
+    assert.equal(rejected.structuredContent.code, 'AUTH_REQUIRED');
+    assert.ok(rejected.structuredContent.recovery_action);
+    await mcp.close();
+    const reconnect = await client(sidecar);
+    assert.equal((await reconnect.call('desensitization_status')).isError ?? false, false);
+    await reconnect.close();
+    console.log('PASS final signed app: auto-launch, stdio → socket → desktop, login guidance and reconnect; no model downloads');
   } else if (mode === '--desktop' && process.platform === 'darwin') {
     root = await mkdtemp('/private/tmp/sixa-mcp-');
     const env = { ...process.env, SIXA_DESKTOP_TEST_ROOT: join(root, 'profile'),
@@ -204,6 +226,15 @@ try {
     throw new Error('Usage: --metadata <mcp> | --desktop <debug-desktop> <debug-mcp> | --launch <debug-mcp> (macOS)');
   }
 } finally {
+  if (packagedExecutable) {
+    const listing = execFileSync('/bin/ps', ['-axo', 'pid=,comm='], { encoding: 'utf8' });
+    for (const line of listing.split('\n')) {
+      const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+      if (match && match[2].trim() === packagedExecutable) {
+        try { process.kill(Number(match[1]), 'SIGKILL'); } catch { /* already exited */ }
+      }
+    }
+  }
   for (const child of children) await stop(child);
   for (const starts of launchedHosts) {
     const pids = await readFile(starts, 'utf8').catch(() => '');

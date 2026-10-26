@@ -2,6 +2,7 @@
 mod activity;
 mod auth;
 mod batch_jobs;
+mod files;
 #[cfg(any(windows, target_os = "macos"))]
 mod integration;
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -553,11 +554,22 @@ async fn execute(state: Shared<'_>, app: tauri::AppHandle, id: Uuid) -> Result<T
     )
     .await;
     unregister_run(&state, id)?;
+    let result = match result {
+        Ok(mut view) => {
+            if let Err(error) = files::automatic(state.clone(), &app, id).await {
+                view.warnings.push(format!(
+                    "处理完成，自动保存未完成：{error}。请使用另存为保存结果。"
+                ));
+            }
+            Ok(view)
+        }
+        Err(error) => Err(error),
+    };
     finish_task(&app, id, result)
 }
 #[tauri::command]
 async fn export_task(state: Shared<'_>, id: Uuid, path: PathBuf) -> Result<()> {
-    job(state, move |e| e.export(id, &path)).await
+    job(state, move |e| e.export_recorded(id, &path)).await
 }
 #[tauri::command]
 async fn export_recovery(
@@ -690,6 +702,9 @@ async fn execute_batch(state: Shared<'_>, app: tauri::AppHandle, id: Uuid) -> Re
     );
     let result = batch_jobs::execute(state.clone(), app.clone(), id, run).await;
     unregister_run(&state, id)?;
+    if result.is_ok() {
+        files::automatic(state.clone(), &app, id).await?;
+    }
     finish_batch(&app, id, result)
 }
 #[tauri::command]
@@ -721,7 +736,7 @@ async fn retry_batch(
 }
 #[tauri::command]
 async fn export_batch(state: Shared<'_>, id: Uuid, path: PathBuf) -> Result<()> {
-    job(state, move |e| e.export_batch(id, &path)).await
+    job(state, move |e| e.export_recorded(id, &path)).await
 }
 #[tauri::command]
 async fn list_rules(state: Shared<'_>) -> Result<Vec<Rule>> {
@@ -1353,6 +1368,13 @@ fn main() {
             remove_region,
             execute,
             export_task,
+            files::get_file_directory,
+            files::set_file_directory,
+            files::query_output_files,
+            files::retry_output_file,
+            files::open_output_file,
+            files::output_task_view,
+            files::copy_output_file,
             export_recovery,
             restore,
             list_tasks,

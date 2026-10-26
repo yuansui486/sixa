@@ -15,6 +15,7 @@ import { useWorkbench } from "./store";
 import { flushReview } from "./review";
 import { useJobs, runningJob } from "./jobs";
 import { rememberDirectory } from "./preferences";
+import { FileSaveNotice } from "./Files";
 
 export function Batch() {
   const [params, setParams] = useSearchParams();
@@ -86,14 +87,12 @@ export function Batch() {
     if (!id) return;
     const operationId = command === "retry_batch" ? crypto.randomUUID() : id;
     if (operationId !== id) setParams({ id: operationId });
-    useJobs
-      .getState()
-      .update({
-        id: operationId,
-        stage: "queued",
-        batch: true,
-        terminal: false,
-      });
+    useJobs.getState().update({
+      id: operationId,
+      stage: "queued",
+      batch: true,
+      terminal: false,
+    });
     try {
       const result =
         command === "execute_batch"
@@ -135,6 +134,11 @@ export function Batch() {
           </button>
         </p>
       )}
+      {id &&
+        task.data &&
+        ["completed", "partial"].includes(task.data.meta.state) && (
+          <FileSaveNotice taskId={id} />
+        )}
       <section className="card">
         <div className="toolbar">
           <button

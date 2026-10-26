@@ -384,6 +384,9 @@ test.beforeEach(async ({ page }) => {
         return task;
       },
       export_task: () => undefined,
+      get_file_directory: () => "C:\\test\\exports",
+      set_file_directory: () => undefined,
+      query_output_files: () => ({ items: [], total: 0 }),
       export_recovery: () => undefined,
       list_tasks: () => [task.meta],
       query_tasks: () => ({
@@ -1649,7 +1652,7 @@ test("退出先保存修改，再确认停止任务并处理慢退出", async ({
   await page.evaluate(() => window.__mock__.resolveReviewPatch?.());
   await expect(
     page.getByRole("dialog", { name: "仍有任务正在运行" }),
-  ).toContainText("2 个处理任务、1 个模型下载");
+  ).toContainText("2 个处理任务、1 个下载");
   await page.getByRole("button", { name: "停止并退出" }).click();
   await expect(
     page.getByRole("dialog", { name: "正在停止任务" }),
@@ -1762,4 +1765,37 @@ test("保存超时可以强制退出，但运行中任务仍需确认停止", as
       ),
     ),
   ).toBe(false);
+});
+
+test("文件管理展示默认目录，筛选与空状态在桌面尺寸可用", async ({ page }) => {
+  await page.goto("/#/files");
+  await expect(page.getByRole("heading", { name: "文件管理", exact: true })).toBeVisible();
+  await expect(page.getByText("C:\\test\\exports", { exact: true })).toBeVisible();
+  await expect(page.getByText("还没有保存的处理结果")).toBeVisible();
+  await page.getByLabel("搜索处理结果").fill("合同");
+  await expect(page.getByText("没有符合条件的文件")).toBeVisible();
+  await page.getByLabel("筛选文件格式").selectOption("pdf");
+  await page.getByRole("button", { name: "更改位置" }).click();
+  await expect(page.getByRole("status")).toContainText("保存位置已更新");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("Mac 接入程序缺失时不提供无效配置，并提供明确修复方法", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === "integration_info") return {
+        enabled: true, mcp_available: false, authenticated: true, models_ready: true,
+        app_version: "1.0.10", platform: "macos", executable_path: "/Applications/私匣.app/Contents/MacOS/sixa-mcp",
+        protocol_version: "1", supported_formats: ["PDF", "DOCX"],
+      };
+      return original(command, args);
+    };
+  });
+  await page.goto("/#/integration");
+  await expect(page.getByRole("alert")).toContainText("完整的私匣应用");
+  await expect(page.getByRole("button", { name: "复制配置", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "重新检测安装" })).toBeVisible();
+  await page.getByRole("button", { name: "复制接入诊断信息" }).click();
+  expect(await page.evaluate(() => window.__copied_text__)).toContain('"platform": "macos"');
 });

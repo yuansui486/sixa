@@ -8,6 +8,22 @@ export type TaskState =
   | "partial"
   | "failed"
   | "cancelled";
+export interface OutputFile {
+  id: string;
+  task_id: string;
+  name: string;
+  kind: string;
+  path: string;
+  created_at: number;
+  size: number;
+  error: string | null;
+  generation: string;
+  partial: boolean;
+  failed_count: number;
+  source: string;
+  exists: boolean;
+  task_exists: boolean;
+}
 export interface TaskMeta {
   id: string;
   kind: string;
@@ -214,6 +230,8 @@ export interface AuthStatus {
 export interface IntegrationInfo {
   enabled: boolean;
   mcp_available: boolean;
+  app_version?: string;
+  platform?: string;
   authenticated: boolean;
   models_ready: boolean;
   executable_path: string;
@@ -397,6 +415,23 @@ interface Commands {
   };
   execute: { args: { id: string }; result: TaskView };
   export_task: { args: { id: string; path: string }; result: void };
+  get_file_directory: { args: undefined; result: string };
+  set_file_directory: { args: { path: string }; result: void };
+  query_output_files: {
+    args: {
+      query: {
+        search?: string;
+        kind?: string;
+        offset?: number;
+        task_id?: string;
+      };
+    };
+    result: { items: OutputFile[]; total: number };
+  };
+  retry_output_file: { args: { id: string }; result: OutputFile };
+  open_output_file: { args: { id: string }; result: void };
+  output_task_view: { args: { id: string }; result: TaskView };
+  copy_output_file: { args: { id: string; path: string }; result: void };
   export_recovery: {
     args: { id: string; path: string; password: string };
     result: void;

@@ -54,6 +54,58 @@ fn guarded_load<T>(load: impl FnOnce() -> Result<T>) -> Result<T> {
         Err(Error::ModelsNotReady("推理引擎发生内部异常，请退出私匣后重新打开；如仍失败，请提供 logs/models.log 中的加载阶段记录".into()))
     })
 }
+
+// Session construction is native and cannot safely be killed from another thread.
+// Mark it unavailable on timeout, cancel any active inference, and keep its worker
+// occupied until it actually returns. Never advertise the timed-out model as ready.
+struct LoadDeadline {
+    _stop: std::sync::mpsc::Sender<()>,
+    state: Arc<std::sync::atomic::AtomicU8>,
+}
+impl LoadDeadline {
+    fn start(
+        status: Arc<Mutex<RuntimeModelStatus>>,
+        index: usize,
+        operation: Uuid,
+        run: OcrRun,
+        app: Option<tauri::AppHandle>,
+        timeout: std::time::Duration,
+    ) -> Self {
+        let (stop, receive) = std::sync::mpsc::channel();
+        let state = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let flag = state.clone();
+        std::thread::spawn(move || {
+            if receive.recv_timeout(timeout) != Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                return;
+            }
+            if flag
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return;
+            }
+            let _ = run.cancel();
+            if let Ok(mut snapshot) = status.lock() {
+                let capability = &mut snapshot.capabilities[index];
+                if capability.operation_id == Some(operation) && capability.state == "loading" {
+                    capability.ready = false;
+                    capability.state = "failed".into();
+                    capability.error = Some("模型加载超过 120 秒，已停止等待；本机推理引擎可能仍在退出，请重启私匣后重试。详情见 logs/models.log".into());
+                }
+            }
+            let _ = publish(&status, app.as_ref());
+        });
+        Self { _stop: stop, state }
+    }
+    fn finish(&self) {
+        let _ = self
+            .state
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
+    }
+    fn expired(&self) -> bool {
+        self.state.load(Ordering::Acquire) == 1
+    }
+}
 #[derive(Clone, Copy)]
 pub struct Requirements {
     mask: u8,
@@ -179,6 +231,8 @@ pub fn ensure(
             continue;
         }
         let operation_id = Uuid::new_v4();
+        let local_run = OcrRun::new()?;
+        let run = run.unwrap_or(&local_run);
         {
             let mut status = status.lock().map_err(poisoned)?;
             let capability = &mut status.capabilities[index];
@@ -191,8 +245,14 @@ pub fn ensure(
         }
         publish(status, app)?;
         let start = Instant::now();
-        let local_run = OcrRun::new()?;
-        let run = run.unwrap_or(&local_run);
+        let deadline = LoadDeadline::start(
+            status.clone(),
+            index,
+            operation_id,
+            run.clone(),
+            app.cloned(),
+            std::time::Duration::from_secs(120),
+        );
         let stage = Cell::new("inspect");
         let mut progress = |value: &'static str| {
             stage.set(value);
@@ -233,10 +293,23 @@ pub fn ensure(
                     _ => unreachable!(),
                 }
             }
+            deadline.finish();
+            if deadline.expired() {
+                match index {
+                    0 => engine.ner = None,
+                    1 => engine.ocr_mobile = None,
+                    2 => engine.ocr_accurate = None,
+                    _ => (),
+                }
+                return Err(Error::ModelsNotReady(
+                    "模型加载超时，请重启私匣后重试".into(),
+                ));
+            }
             worker.loaded.fetch_or(bit, Ordering::Release);
             Ok(verified)
         })
         .map_err(|error| Error::ModelsNotReady(format!("{}：{error}", load_label(stage.get()))));
+        deadline.finish();
         {
             let mut status = status.lock().map_err(poisoned)?;
             let capability = &mut status.capabilities[index];
@@ -257,13 +330,17 @@ pub fn ensure(
                 }
                 Err(error) => {
                     capability.installed = verify_installed(root, id, false).is_ok();
-                    capability.error = if run.is_cancelled() {
+                    capability.error = if deadline.expired() {
+                        Some("模型加载超时，请重启私匣后重试".into())
+                    } else if run.is_cancelled() {
                         None
                     } else {
                         Some(error.to_string())
                     };
                     capability.state = if capability.ready {
                         "ready"
+                    } else if deadline.expired() {
+                        "failed"
                     } else if run.is_cancelled() && capability.installed {
                         "installed"
                     } else if !capability.installed {
@@ -340,6 +417,42 @@ pub fn unload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stalled_native_load_marks_failure_without_claiming_readiness() {
+        let root = tempfile::tempdir().unwrap();
+        let status = Arc::new(Mutex::new(initial(root.path())));
+        let operation = Uuid::new_v4();
+        {
+            let mut snapshot = status.lock().unwrap();
+            snapshot.capabilities[0].state = "loading".into();
+            snapshot.capabilities[0].operation_id = Some(operation);
+        }
+        let run = OcrRun::new().unwrap();
+        let deadline = LoadDeadline::start(
+            status.clone(),
+            0,
+            operation,
+            run.clone(),
+            None,
+            std::time::Duration::from_millis(10),
+        );
+        let until = Instant::now() + std::time::Duration::from_secs(2);
+        while status.lock().unwrap().capabilities[0].state == "loading" && Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(deadline.expired());
+        assert!(run.is_cancelled());
+        let snapshot = status.lock().unwrap();
+        assert_eq!(snapshot.capabilities[0].state, "failed");
+        assert!(!snapshot.capabilities[0].ready);
+        assert!(
+            snapshot.capabilities[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("重启")
+        );
+    }
     #[test]
     fn runtime_panic_becomes_an_error_without_poisoning_worker_lock() {
         let worker = Mutex::new(());

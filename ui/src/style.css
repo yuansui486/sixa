@@ -2006,3 +2006,27 @@ mark.focused {
   box-shadow: 0 4px 18px rgba(23, 40, 32, 0.12);
   font-size: 13px;
 }
+
+.file-directory {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+.file-directory > div {
+  min-width: 0;
+}
+.file-path {
+  overflow-wrap: anywhere;
+}
+.files-table td:first-child {
+  max-width: 330px;
+}
+.files-table .row-actions {
+  max-width: 340px;
+}
+.files-table .file-path {
+  display: block;
+  color: var(--muted);
+}
