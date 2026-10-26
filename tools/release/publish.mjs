@@ -107,6 +107,9 @@ for (const name of (await readdir(directory)).sort()) {
 // do not support If-Match on PutObject; the version and digest checks above
 // protect against stale or conflicting manifests before this final write.
 const conditions = previous ? {} : { "x-oss-forbid-overwrite": "true" };
+const latest = await head(stableKey);
+if (latest?.etag !== previous?.etag)
+  throw Error("稳定清单在上传期间已改变，请重新核对后重试发布");
 await client.put(stableKey, manifestBytes, {
   mime: "application/json",
   headers: {

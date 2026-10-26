@@ -375,7 +375,17 @@ jobs:
           fi
 
       - name: 上传 OSS 并最后更新稳定版本清单
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: .release-publisher
+          sparse-checkout: |
+            tools/release
+            src-tauri/tauri.conf.json
+      - name: 安装发布脚本依赖
+        run: npm ci --prefix .release-publisher/tools/release
+      - name: 上传已验收产物并更新稳定清单
         env:
           OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
-        run: node tools/release/publish.mjs release-ready
+        run: node .release-publisher/tools/release/publish.mjs release-ready
