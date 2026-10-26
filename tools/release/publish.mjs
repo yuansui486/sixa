@@ -103,11 +103,10 @@ for (const name of (await readdir(directory)).sort()) {
     throw Error(`OSS 对象校验失败：${name}`);
   console.log(`已核对 ${name}`);
 }
-// The workflow serializes publication across ALL tags. If-Match also protects
-// against a concurrent operator changing the live manifest outside Actions.
-const conditions = previous
-  ? { "If-Match": previous.etag }
-  : { "x-oss-forbid-overwrite": "true" };
+// The workflow serializes publication across all tags. OSS-compatible clients
+// do not support If-Match on PutObject; the version and digest checks above
+// protect against stale or conflicting manifests before this final write.
+const conditions = previous ? {} : { "x-oss-forbid-overwrite": "true" };
 await client.put(stableKey, manifestBytes, {
   mime: "application/json",
   headers: {
