@@ -216,7 +216,15 @@ export function Files() {
                       {file.source === "mcp" && <small>AI 工具生成</small>}
                     </td>
                     <td>
-                      {new Date(file.created_at * 1000).toLocaleString("zh-CN")}
+                      {new Date(file.created_at * 1000).toLocaleDateString(
+                        "zh-CN",
+                      )}
+                      <small>
+                        {new Date(file.created_at * 1000).toLocaleTimeString(
+                          "zh-CN",
+                          { hour: "2-digit", minute: "2-digit" },
+                        )}
+                      </small>
                     </td>
                     <td>{file.error ? "—" : formatBytes(file.size)}</td>
                     <td>

@@ -1769,33 +1769,100 @@ test("保存超时可以强制退出，但运行中任务仍需确认停止", as
 
 test("文件管理展示默认目录，筛选与空状态在桌面尺寸可用", async ({ page }) => {
   await page.goto("/#/files");
-  await expect(page.getByRole("heading", { name: "文件管理", exact: true })).toBeVisible();
-  await expect(page.getByText("C:\\test\\exports", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "文件管理", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("C:\\test\\exports", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("还没有保存的处理结果")).toBeVisible();
   await page.getByLabel("搜索处理结果").fill("合同");
   await expect(page.getByText("没有符合条件的文件")).toBeVisible();
   await page.getByLabel("筛选文件格式").selectOption("pdf");
   await page.getByRole("button", { name: "更改位置" }).click();
   await expect(page.getByRole("status")).toContainText("保存位置已更新");
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
 });
 
-test("Mac 接入程序缺失时不提供无效配置，并提供明确修复方法", async ({ page }) => {
+test("Mac 接入程序缺失时不提供无效配置，并提供明确修复方法", async ({
+  page,
+}) => {
   await page.addInitScript(() => {
     const original = window.__TAURI_INTERNALS__.invoke;
     window.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
-      if (command === "integration_info") return {
-        enabled: true, mcp_available: false, authenticated: true, models_ready: true,
-        app_version: "1.0.10", platform: "macos", executable_path: "/Applications/私匣.app/Contents/MacOS/sixa-mcp",
-        protocol_version: "1", supported_formats: ["PDF", "DOCX"],
-      };
+      if (command === "integration_info")
+        return {
+          enabled: true,
+          mcp_available: false,
+          authenticated: true,
+          models_ready: true,
+          app_version: "1.0.10",
+          platform: "macos",
+          executable_path: "/Applications/私匣.app/Contents/MacOS/sixa-mcp",
+          protocol_version: "1",
+          supported_formats: ["PDF", "DOCX"],
+        };
       return original(command, args);
     };
   });
   await page.goto("/#/integration");
   await expect(page.getByRole("alert")).toContainText("完整的私匣应用");
-  await expect(page.getByRole("button", { name: "复制配置", exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "重新检测安装" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "复制配置", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "重新检测安装" }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "复制接入诊断信息" }).click();
-  expect(await page.evaluate(() => window.__copied_text__)).toContain('"platform": "macos"');
+  expect(await page.evaluate(() => window.__copied_text__)).toContain(
+    '"platform": "macos"',
+  );
+});
+
+test("有处理结果时所有文件操作均留在可见表格内", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === "query_output_files")
+        return {
+          total: 1,
+          items: [
+            {
+              id: "saved-1",
+              task_id: "task-pdf-1",
+              name: "项目合作协议_脱敏.pdf",
+              kind: "pdf",
+              path: "C:/Users/用户/Documents/私匣/处理结果/项目合作协议_脱敏.pdf",
+              created_at: 1793000000,
+              size: 192032,
+              error: null,
+              generation: "1",
+              partial: false,
+              failed_count: 0,
+              source: "automatic",
+              exists: true,
+              task_exists: true,
+            },
+          ],
+        };
+      return original(command, args);
+    };
+  });
+  await page.goto("/#/files");
+  await expect(
+    page.getByText("项目合作协议_脱敏.pdf", { exact: true }),
+  ).toBeVisible();
+  const bounds = await page.locator(".table-scroll").boundingBox();
+  for (const label of ["预览", "打开文件", "所在文件夹", "另存为"]) {
+    const button = page.getByRole("button", { name: label, exact: true });
+    await expect(button).toBeVisible();
+    const box = await button.boundingBox();
+    expect(box!.x + box!.width).toBeLessThanOrEqual(
+      bounds!.x + bounds!.width + 1,
+    );
+  }
 });

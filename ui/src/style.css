@@ -2024,9 +2024,14 @@ mark.focused {
   max-width: 330px;
 }
 .files-table .row-actions {
-  max-width: 340px;
+  flex-wrap: wrap;
+  min-width: 170px;
+  max-width: 260px;
 }
 .files-table .file-path {
   display: block;
-  color: var(--muted);
+  color: #718094;
+}
+.files-table td:nth-child(2) {
+  white-space: nowrap;
 }
