@@ -36,7 +36,7 @@ impl Engine {
                 .map(|item| {
                     let revision = if item.state == TaskState::Completed {
                         item.task_id
-                            .map(|id| self.view(id).map(|v| v.revision))
+                            .map(|id| self.mutable_review(id, false).map(|v| v.revision))
                             .transpose()?
                     } else {
                         None
@@ -56,8 +56,8 @@ impl Engine {
                     .count(),
             ))
         } else {
-            let view = self.view(id)?;
-            Ok((view.revision.to_string(), view.extension, false, 0))
+            let revision = self.mutable_review(id, false)?.revision;
+            Ok((revision.to_string(), meta.kind, false, 0))
         }
     }
 

@@ -702,8 +702,15 @@ async fn execute_batch(state: Shared<'_>, app: tauri::AppHandle, id: Uuid) -> Re
     );
     let result = batch_jobs::execute(state.clone(), app.clone(), id, run).await;
     unregister_run(&state, id)?;
-    if result.is_ok() {
-        files::automatic(state.clone(), &app, id).await?;
+    if result.is_ok()
+        && let Err(error) = files::automatic(state.clone(), &app, id).await
+    {
+        // Announce the actual completed task even if recording the save failed.
+        let completed = finish_batch(&app, id, result)?;
+        return Err(Error::Io(format!(
+            "批量处理已完成，但自动保存未完成：{error}。请打开批次 {} 手动保存结果。",
+            completed.meta.id
+        )));
     }
     finish_batch(&app, id, result)
 }
