@@ -1827,6 +1827,11 @@ test("有处理结果时所有文件操作均留在可见表格内", async ({ pa
   await page.addInitScript(() => {
     const original = window.__TAURI_INTERNALS__.invoke;
     window.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === "output_task_view")
+        return {
+          ...window.__mock__.task,
+          meta: { ...window.__mock__.task.meta, state: "completed" },
+        };
       if (command === "query_output_files")
         return {
           total: 1,
@@ -1865,4 +1870,8 @@ test("有处理结果时所有文件操作均留在可见表格内", async ({ pa
       bounds!.x + bounds!.width + 1,
     );
   }
+  await page.getByRole("button", { name: "预览", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "已生成文件", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
 });

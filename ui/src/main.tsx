@@ -1496,7 +1496,9 @@ function Workbench() {
   const [resultLoading, setResultLoading] = useState(false);
   const [resultError, setResultError] = useState("");
   const [pendingId, setPendingId] = useState<string | null>(null);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>("source");
+  const [previewMode, setPreviewMode] = useState<PreviewMode>(
+    task?.meta.state === "completed" ? "result" : "source",
+  );
   const [officeView, setOfficeView] = useState<"body" | "images">("body");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("entities");
   const preferences = usePreferences();
@@ -1604,7 +1606,11 @@ function Workbench() {
     setDocxPageCount(0);
     setDocxPageRequest(undefined);
     setDocxScrollAnchor(null);
-    setPreviewMode("source");
+    setPreviewMode(
+      useWorkbench.getState().task?.meta.state === "completed"
+        ? "result"
+        : "source",
+    );
     setDeletedRegion(null);
     setExportedPath("");
     setPendingRegions(new Set());
