@@ -244,7 +244,7 @@ try {
         const second = await client(bundledMcp, env);
         const statuses = await Promise.all([mcp.call('desensitization_status'), second.call('desensitization_status')]);
         for (const result of statuses) {
-          assert.equal(result.isError ?? false, false);
+          assert.equal(result.isError ?? false, false, JSON.stringify(result.structuredContent));
           assert.equal(result.structuredContent.authenticated, false);
           assert.equal(result.structuredContent.ready, false);
           assert.ok(result.structuredContent.next_action);

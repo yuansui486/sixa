@@ -17,7 +17,7 @@ ort 2.0.0-rc.12 在加载动态库失败时构造 `ort::Error`；这个错误构
 `scripts/macos-runtime-smoke.mjs` 设置 30 秒进程超时：
 
 1. 在最终签名的 DMG 主程序中检查推理库加载。
-2. 给独立推理探针设置 hardened runtime，但不授予 library validation 例外，确认系统拒绝会及时返回错误。
+2. 给独立推理探针设置 hardened runtime，但不授予 library validation 例外；若系统实施拒绝，确认及时返回错误。部分托管 CI 放宽 AMFI，允许此加载时明确记录无法覆盖该反向检查，不误报已验证拒绝路径；用户故障机已实际复现系统拒绝。
 3. 使用正式应用的 entitlements 重签探针，验证库缺失和损坏后可以重试，并通过真实生产加载器运行离线 NER/OCR 微型图。
 4. 继续验证更新归档与 DMG 的可执行文件、MCP 和动态库完全相同。
 

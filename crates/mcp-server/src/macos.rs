@@ -43,6 +43,8 @@ pub async fn connect_or_launch(path: &Path) -> Result<UnixStream, IntegrationErr
         }
         let mut last = LAST_LAUNCH.lock().await;
         let mut launch_lock = None;
+        let mut waiting_for_launch = false;
+        let mut waiting_for_other_launcher = false;
         loop {
             if integration_protocol::updating::active() {
                 return Err(IntegrationError::new(ErrorCode::AppUpdating, "私匣正在安装更新，请等待更新完成后重新连接 MCP"));
@@ -52,7 +54,7 @@ pub async fn connect_or_launch(path: &Path) -> Result<UnixStream, IntegrationErr
                 Err(error) if absent(&error) => (),
                 Err(error) => return Err(transport_error(error)),
             }
-            if launch_lock.is_none() {
+            if launch_lock.is_none() && !waiting_for_launch {
                 if startup_needs_attention(path).map_err(transport_error)? {
                     return Err(IntegrationError::new(ErrorCode::StartupBlocked,
                         "私匣上次启动未完成，可能正在等待系统钥匙串授权。为避免反复弹窗，已停止自动启动。请手动打开私匣并处理系统提示，应用就绪后再检查 MCP 状态；不要自动循环重试或删除钥匙串密钥"
@@ -62,6 +64,10 @@ pub async fn connect_or_launch(path: &Path) -> Result<UnixStream, IntegrationErr
                     Ok(mut lock) => {
                         if last.is_some_and(|time| time.elapsed() < RETRY_COOLDOWN)
                             || !lock.begin_launch(RETRY_COOLDOWN).map_err(transport_error)? {
+                            if waiting_for_other_launcher {
+                                waiting_for_launch = true;
+                                continue;
+                            }
                             return Err(unavailable("私匣尚未完成启动。请检查桌面窗口并完成登录，30 秒后重新检查状态"));
                         }
                         let executable = std::env::current_exe().map_err(transport_error)?;
@@ -79,7 +85,7 @@ pub async fn connect_or_launch(path: &Path) -> Result<UnixStream, IntegrationErr
                             return Err(unavailable("macOS 未能打开私匣。请手动打开应用，检查系统提示后重新检查状态"));
                         }
                     }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => { waiting_for_other_launcher = true; },
                     Err(error) => return Err(transport_error(error)),
                 }
             }
