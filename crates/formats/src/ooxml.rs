@@ -19,10 +19,21 @@ pub struct Piece {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Office {
+    #[serde(default)]
+    anchor_version: u8,
     pub text: String,
     pieces: Vec<Piece>,
     media_entries: Vec<String>,
     signature_entries: Vec<String>,
+}
+impl Office {
+    pub fn same_part(&self, span: Span) -> bool {
+        let mut parts = self.pieces.iter().filter(|p| p.span.overlaps(span));
+        let Some(first) = parts.next() else {
+            return false;
+        };
+        parts.all(|p| p.part == first.part)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +105,7 @@ impl Office {
         let mut sorted: Vec<_> = names.into_iter().collect();
         sorted.sort();
         let mut office = Self {
+            anchor_version: 1,
             text: String::new(),
             pieces: Vec::new(),
             media_entries: sorted
@@ -163,9 +175,6 @@ impl Office {
         !self.signature_entries.is_empty()
     }
     fn add(&mut self, part: &str, start: usize, end: usize, text: &str) {
-        if text.is_empty() {
-            return;
-        }
         let span = Span {
             start: self.text.len(),
             end: self.text.len() + text.len(),
@@ -490,6 +499,7 @@ mod tests {
     #[test]
     fn relationships_are_extracted_and_escaped() {
         let mut office = Office {
+            anchor_version: 1,
             text: String::new(),
             pieces: vec![],
             media_entries: vec![],

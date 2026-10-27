@@ -59,6 +59,7 @@
   margin: 8px 0;
 }
 .sixa-docx-content {
+  overflow-anchor: none;
   height: min(65vh, 620px);
   min-height: 240px;
   overflow: auto;

@@ -92,6 +92,12 @@ enum DocumentContent {
     Pdf,
 }
 impl Document {
+    pub fn valid_text_match(&self, span: domain::Span) -> bool {
+        match &self.content {
+            DocumentContent::Office(office) => office.same_part(span),
+            _ => true,
+        }
+    }
     pub fn office_presentation(
         &self,
         revision: u64,

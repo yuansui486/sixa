@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { save } from "@tauri-apps/plugin-dialog";
+import { SaveResult, resultName, type SaveTarget } from "./SaveResult";
 import {
   call,
   formatBytes,
@@ -13,7 +13,7 @@ import {
 import { useWorkbench } from "./store";
 import { flushReview } from "./review";
 import { clearPreviewCache } from "./preview-cache";
-import { exportName, rememberDirectory } from "./preferences";
+
 export function Tasks() {
   const [search, setSearch] = useState("");
   const [settledSearch, setSettledSearch] = useState("");
@@ -24,6 +24,7 @@ export function Tasks() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [savedPath, setSavedPath] = useState("");
+  const [saving, setSaving] = useState<SaveTarget | null>(null);
   const navigate = useNavigate();
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -73,6 +74,20 @@ export function Tasks() {
   };
   return (
     <>
+      {saving && (
+        <SaveResult
+          target={saving}
+          onClose={() => setSaving(null)}
+          onSaved={(where) => {
+            setSaving(null);
+            if (where.external) setSavedPath(where.path);
+            else
+              navigate(
+                `/files?dir=${encodeURIComponent(where.relative)}&highlight=${encodeURIComponent(where.path.split(/[\\/]/).pop() || "")}`,
+              );
+          }}
+        />
+      )}
       <header>
         <h1>任务历史</h1>
         <p>继续检查文件，查看处理结果或重新尝试。</p>
@@ -176,6 +191,17 @@ export function Tasks() {
                     </td>
                     <td>
                       {stateLabels[item.state]}
+                      {tasks.data?.output_states?.[item.id] && (
+                        <small>
+                          {
+                            {
+                              saved: "已保存",
+                              missing: "文件已移动或删除",
+                              unsaved: "已生成，未保存",
+                            }[tasks.data.output_states[item.id]]
+                          }
+                        </small>
+                      )}
                       {item.error_info && (
                         <details className="task-error">
                           <summary>{item.error_info.title}</summary>
@@ -214,21 +240,12 @@ export function Tasks() {
                               className="secondary"
                               disabled={busy}
                               onClick={() =>
-                                void run(async () => {
-                                  const path = await save({
-                                    defaultPath: exportName(
-                                      item.display_name,
-                                      item.kind,
-                                    ),
-                                  });
-                                  if (path) {
-                                    await call("export_task", {
-                                      id: item.id,
-                                      path,
-                                    });
-                                    rememberDirectory(path);
-                                    setSavedPath(path);
-                                  }
+                                setSaving({
+                                  id: item.id,
+                                  name: resultName(
+                                    item.display_name,
+                                    item.kind,
+                                  ),
                                 })
                               }
                             >

@@ -269,6 +269,9 @@ async fn mcp_stdio_check(executable: &Path) -> std::result::Result<String, Strin
             .ok_or_else(|| "MCP 工具清单格式无效".to_owned())?;
         let required = [
             "desensitization_status",
+            "list_desensitized_files",
+            "browse_output_directory",
+            "create_output_directory",
             "desensitize_file",
             "desensitize_batch",
             "get_desensitization_job",
@@ -518,6 +521,76 @@ async fn dispatch_method(
     params: Value,
 ) -> std::result::Result<Value, IntegrationError> {
     match method {
+        Method::BrowseDirectory => {
+            let query = parse_params(params)?;
+            let result =
+                crate::files::browse_directory(app.state::<AppState>(), app.clone(), query)
+                    .await
+                    .map_err(map_error)?;
+            to_value(result)
+        }
+        Method::CreateDirectory => {
+            #[derive(serde::Deserialize)]
+            struct Create {
+                #[serde(default)]
+                relative: String,
+                name: String,
+            }
+            let args: Create = parse_params(params)?;
+            let path = crate::files::create_output_directory(
+                app.state::<AppState>(),
+                app.clone(),
+                args.relative,
+                args.name,
+            )
+            .await
+            .map_err(map_error)?;
+            to_value(
+                serde_json::json!({"path":path,"message":"文件夹已创建；请将此绝对路径作为 output_dir 提交任务"}),
+            )
+        }
+        Method::ListOutputs => {
+            #[derive(serde::Deserialize)]
+            struct List {
+                #[serde(default)]
+                history: bool,
+                #[serde(default)]
+                relative: String,
+                #[serde(default)]
+                search: String,
+                #[serde(default)]
+                offset: u32,
+            }
+            let args: List = parse_params(params)?;
+            let default = crate::files::default_directory(app);
+            let result = crate::work(app.state::<AppState>(), move |e| {
+                let directory = if args.history {
+                    None
+                } else {
+                    let root = crate::files::configured_root(e, default)?;
+                    if !root.exists() && args.relative.is_empty() {
+                        return Ok(storage::files::OutputPage {
+                            items: vec![],
+                            total: 0,
+                        });
+                    }
+                    Some(
+                        storage::directory::resolve(&root, &args.relative)?
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                };
+                e.store.output_page(storage::files::OutputQuery {
+                    search: args.search,
+                    offset: args.offset,
+                    directory,
+                    ..Default::default()
+                })
+            })
+            .await
+            .map_err(map_error)?;
+            to_value(result)
+        }
         Method::Status => {
             let state = app.state::<AppState>();
             let authenticated = state.auth.require_authenticated().is_ok();
@@ -599,7 +672,7 @@ fn enqueue_file(
     params: DesensitizeFileParams,
 ) -> std::result::Result<Uuid, IntegrationError> {
     let source = validate_source(&params.source_path)?;
-    let output_dir = validate_output_dir(params.output_dir.as_deref(), &source)?;
+    let output_dir = resolve_output_dir(&app, params.output_dir.as_deref())?;
     ensure_ready(&app)?;
     let id = Uuid::new_v4();
     let state = app.state::<AppState>();
@@ -758,7 +831,7 @@ fn enqueue_batch(
         .iter()
         .map(|path| validate_source(path))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let output_dir = validate_output_dir(params.output_dir.as_deref(), &sources[0])?;
+    let output_dir = resolve_output_dir(&app, params.output_dir.as_deref())?;
     ensure_ready(&app)?;
     let id = Uuid::new_v4();
     let state = app.state::<AppState>();
@@ -956,6 +1029,44 @@ fn validate_source(path: &Path) -> std::result::Result<PathBuf, IntegrationError
         ));
     }
     Ok(path)
+}
+
+fn resolve_output_dir(
+    app: &AppHandle,
+    requested: Option<&Path>,
+) -> std::result::Result<PathBuf, IntegrationError> {
+    let state = app.state::<AppState>();
+    state.auth.require_authenticated().map_err(map_error)?;
+    if let Some(path) = requested {
+        return validate_output_dir(Some(path), path);
+    }
+    let engine = state
+        .control
+        .lock()
+        .map_err(|_| IntegrationError::new(ErrorCode::TaskFailed, "目录状态不可用"))?;
+    let root =
+        crate::files::root(&engine, crate::files::default_directory(app)).map_err(map_error)?;
+    let entries = std::fs::read_dir(&root).map_err(map_io)?;
+    for entry in entries {
+        let entry = entry.map_err(map_io)?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if entry
+            .path()
+            .canonicalize()
+            .is_ok_and(|p| p.starts_with(&root) && p.is_dir())
+        {
+            return Err(IntegrationError::new(
+                ErrorCode::OutputDirectoryRequired,
+                format!(
+                    "保存根目录 {} 中有子文件夹。请调用 browse_output_directory 后询问用户保存位置，必要时调用 create_output_directory；再使用明确的 output_dir 提交。本次没有创建任务。",
+                    root.display()
+                ),
+            ));
+        }
+    }
+    Ok(root)
 }
 
 fn validate_output_dir(

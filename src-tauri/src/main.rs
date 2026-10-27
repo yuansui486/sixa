@@ -9,6 +9,7 @@ mod integration;
 #[path = "integration_non_windows.rs"]
 mod integration;
 mod lifecycle;
+mod manual;
 mod preview_jobs;
 mod runtime;
 mod scheduler;
@@ -554,17 +555,6 @@ async fn execute(state: Shared<'_>, app: tauri::AppHandle, id: Uuid) -> Result<T
     )
     .await;
     unregister_run(&state, id)?;
-    let result = match result {
-        Ok(mut view) => {
-            if let Err(error) = files::automatic(state.clone(), &app, id).await {
-                view.warnings.push(format!(
-                    "处理完成，自动保存未完成：{error}。请使用另存为保存结果。"
-                ));
-            }
-            Ok(view)
-        }
-        Err(error) => Err(error),
-    };
     finish_task(&app, id, result)
 }
 #[tauri::command]
@@ -601,6 +591,7 @@ struct TaskPage {
     total: u64,
     offset: u32,
     limit: u32,
+    output_states: HashMap<Uuid, String>,
 }
 #[tauri::command]
 async fn query_tasks(state: Shared<'_>, query: storage::TaskQuery) -> Result<TaskPage> {
@@ -608,11 +599,23 @@ async fn query_tasks(state: Shared<'_>, query: storage::TaskQuery) -> Result<Tas
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     work(state, move |engine| {
         let page = engine.store.task_page(query)?;
+        let output_states = page
+            .items
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.state,
+                    domain::TaskState::Completed | domain::TaskState::Partial
+                )
+            })
+            .map(|task| Ok((task.id, engine.store.output_state(task.id)?.to_owned())))
+            .collect::<Result<_>>()?;
         Ok(TaskPage {
             items: page.items,
             total: page.total,
             offset,
             limit,
+            output_states,
         })
     })
     .await
@@ -702,16 +705,6 @@ async fn execute_batch(state: Shared<'_>, app: tauri::AppHandle, id: Uuid) -> Re
     );
     let result = batch_jobs::execute(state.clone(), app.clone(), id, run).await;
     unregister_run(&state, id)?;
-    if result.is_ok()
-        && let Err(error) = files::automatic(state.clone(), &app, id).await
-    {
-        // Announce the actual completed task even if recording the save failed.
-        let completed = finish_batch(&app, id, result)?;
-        return Err(Error::Io(format!(
-            "批量处理已完成，但自动保存未完成：{error}。请打开批次 {} 手动保存结果。",
-            completed.meta.id
-        )));
-    }
     finish_batch(&app, id, result)
 }
 #[tauri::command]
@@ -1432,6 +1425,15 @@ fn main() {
             remove_region,
             execute,
             export_task,
+            files::browse_directory,
+            manual::find_text,
+            manual::apply_text,
+            manual::undo_text,
+            manual::save_quick_rule,
+            files::create_output_directory,
+            files::save_result,
+            files::copy_result,
+            files::open_directory_entry,
             files::get_file_directory,
             files::set_file_directory,
             files::query_output_files,

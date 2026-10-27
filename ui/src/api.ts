@@ -24,6 +24,32 @@ export interface OutputFile {
   exists: boolean;
   task_exists: boolean;
 }
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+  directory: boolean;
+  size: number;
+  modified: number;
+  output: OutputFile | null;
+}
+export interface DirectoryPage {
+  root: string;
+  path: string;
+  relative: string;
+  items: DirectoryEntry[];
+  total: number;
+}
+export interface TextMatches {
+  revision: number;
+  items: {
+    id: string;
+    display: { start: number; end: number };
+    context: string;
+    conflicts: number;
+    locatable: boolean;
+    page?: number | null;
+  }[];
+}
 export interface TaskMeta {
   id: string;
   kind: string;
@@ -367,6 +393,7 @@ interface Commands {
       total: number;
       offset?: number;
       limit?: number;
+      output_states?: Record<string, "saved" | "missing" | "unsaved">;
     };
   };
   retry_batch: {
@@ -415,6 +442,53 @@ interface Commands {
   };
   execute: { args: { id: string }; result: TaskView };
   export_task: { args: { id: string; path: string }; result: void };
+  browse_directory: {
+    args: {
+      query: {
+        relative?: string;
+        search?: string;
+        kind?: string;
+        offset?: number;
+      };
+    };
+    result: DirectoryPage;
+  };
+  create_output_directory: {
+    args: { relative: string; name: string };
+    result: string;
+  };
+  open_directory_entry: { args: { relative: string }; result: void };
+  save_result: {
+    args: { id: string; relative: string; name: string; mutationId: string };
+    result: OutputFile;
+  };
+  copy_result: {
+    args: { id: string; relative: string; name: string; mutationId: string };
+    result: OutputFile;
+  };
+  find_text: { args: { id: string; query: string }; result: TextMatches };
+  apply_text: {
+    args: {
+      id: string;
+      request: {
+        query: string;
+        replacement: string;
+        match_ids: string[];
+        expected_revision: number;
+        mutation_id: string;
+        allow_conflicts: boolean;
+      };
+    };
+    result: TaskView;
+  };
+  undo_text: {
+    args: { id: string; mutationId: string; expectedRevision: number };
+    result: TaskView;
+  };
+  save_quick_rule: {
+    args: { id: string; name: string; text: string; replacement: string };
+    result: void;
+  };
   get_file_directory: { args: undefined; result: string };
   set_file_directory: { args: { path: string }; result: void };
   query_output_files: {
@@ -424,6 +498,7 @@ interface Commands {
         kind?: string;
         offset?: number;
         task_id?: string;
+        directory?: string;
       };
     };
     result: { items: OutputFile[]; total: number };

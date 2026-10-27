@@ -1,26 +1,117 @@
 use crate::*;
 use storage::files::{OutputPage, OutputQuery, OutputRecord};
 
-fn default_directory(app: &tauri::AppHandle) -> Result<PathBuf> {
+pub(crate) fn default_directory(app: &tauri::AppHandle) -> Result<PathBuf> {
     app.path()
         .document_dir()
         .map(|path| path.join("私匣").join("处理结果"))
         .map_err(|e| Error::Io(format!("无法找到文稿目录，请在文件管理中指定保存位置：{e}")))
 }
 
-pub async fn automatic(state: Shared<'_>, app: &tauri::AppHandle, id: Uuid) -> Result<()> {
-    let default = default_directory(app);
-    work(state, move |engine| {
-        let directory = match engine.store.output_directory()? {
-            Some(path) => path,
-            None => default?,
-        };
-        engine.save_automatically(id, &directory)?;
-        Ok(())
+pub(crate) fn root(engine: &Engine, default: Result<PathBuf>) -> Result<PathBuf> {
+    let path = configured_root(engine, default)?;
+    std::fs::create_dir_all(&path)?;
+    Ok(path.canonicalize()?)
+}
+pub(crate) fn configured_root(engine: &Engine, default: Result<PathBuf>) -> Result<PathBuf> {
+    engine.store.output_directory()?.map(Ok).unwrap_or(default)
+}
+
+#[tauri::command]
+pub async fn browse_directory(
+    state: Shared<'_>,
+    app: tauri::AppHandle,
+    query: storage::directory::DirectoryQuery,
+) -> Result<storage::directory::DirectoryPage> {
+    let default = default_directory(&app);
+    work(state, move |e| {
+        let root = configured_root(e, default)?;
+        if !root.exists() && query.relative.is_empty() {
+            return Ok(storage::directory::DirectoryPage {
+                path: root.clone(),
+                root,
+                relative: PathBuf::new(),
+                items: vec![],
+                total: 0,
+            });
+        }
+        e.store.directory_page(&root, query)
+    })
+    .await
+}
+#[tauri::command]
+pub async fn create_output_directory(
+    state: Shared<'_>,
+    app: tauri::AppHandle,
+    relative: String,
+    name: String,
+) -> Result<PathBuf> {
+    let default = default_directory(&app);
+    work(state, move |e| {
+        storage::directory::create(&root(e, default)?, &relative, &name)
+    })
+    .await
+}
+#[tauri::command]
+pub async fn save_result(
+    state: Shared<'_>,
+    app: tauri::AppHandle,
+    id: Uuid,
+    relative: String,
+    name: String,
+    mutation_id: Uuid,
+) -> Result<OutputRecord> {
+    let default = default_directory(&app);
+    let result = work(state, move |e| {
+        let path = storage::directory::resolve(&root(e, default)?, &relative)?;
+        e.save_result(id, &path, &name, mutation_id)
     })
     .await?;
     let _ = app.emit("files-updated", ());
-    Ok(())
+    Ok(result)
+}
+#[tauri::command]
+pub async fn copy_result(
+    state: Shared<'_>,
+    app: tauri::AppHandle,
+    id: Uuid,
+    relative: String,
+    name: String,
+    mutation_id: Uuid,
+) -> Result<OutputRecord> {
+    let default = default_directory(&app);
+    let result = work(state, move |e| {
+        e.copy_result(
+            id,
+            &storage::directory::resolve(&root(e, default)?, &relative)?,
+            &name,
+            mutation_id,
+        )
+    })
+    .await?;
+    let _ = app.emit("files-updated", ());
+    Ok(result)
+}
+#[tauri::command]
+pub async fn open_directory_entry(
+    state: Shared<'_>,
+    app: tauri::AppHandle,
+    relative: String,
+) -> Result<()> {
+    let default = default_directory(&app);
+    work(state, move |e| {
+        let path = storage::directory::resolve(&root(e, default)?, &relative)?;
+        #[cfg(windows)]
+        std::process::Command::new("explorer.exe")
+            .arg(path)
+            .spawn()?;
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("/usr/bin/open")
+            .arg(path)
+            .spawn()?;
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]

@@ -23,11 +23,43 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod macos;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Serialize)]
+struct DirectoryInput {
+    #[schemars(description = "保存根目录内的相对目录；空字符串表示根目录，不允许 ..")]
+    #[serde(default)]
+    relative: String,
+    #[schemars(description = "分页偏移，每页最多 30 项")]
+    #[serde(default)]
+    offset: u32,
+}
+#[derive(Debug, Deserialize, schemars::JsonSchema, Serialize)]
+struct OutputsInput {
+    #[schemars(
+        description = "true 查询持久化的全部历史导出（包括旧目录和外部另存）；false 只查询当前相对目录"
+    )]
+    #[serde(default)]
+    history: bool,
+    #[serde(default)]
+    relative: String,
+    #[serde(default)]
+    search: String,
+    #[serde(default)]
+    offset: u32,
+}
+#[derive(Debug, Deserialize, schemars::JsonSchema, Serialize)]
+struct CreateDirectoryInput {
+    #[schemars(description = "父文件夹相对保存根目录的路径，根目录使用空字符串")]
+    #[serde(default)]
+    relative: String,
+    #[schemars(description = "用户明确指定的新文件夹名称，不能包含路径分隔符")]
+    name: String,
+}
 #[cfg(windows)]
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
 #[cfg(windows)]
 const CONNECT_RETRY_WINDOW: Duration = Duration::from_millis(750);
-const SERVER_INSTRUCTIONS: &str = "私匣用于在当前 Windows 或 macOS 电脑上脱敏用户明确指定或授权的本地文件。仅在用户要求处理具体文件时调用，不要自行扫描目录。Mac 首次实际调用会尝试自动启动同一应用包内的私匣，最多等待 15 秒；Windows 请先手动打开私匣。未登录时请用户完成登录再继续。models_ready 表示所需模型已安装，首次任务仍可能加载模型，加载失败会返回任务错误。首次调用先使用 desensitization_status；authenticated、authorization_valid、models_ready 和 ready 均为 true 后再创建任务。desensitize_file 和 desensitize_batch 只表示任务已进入队列，必须保存返回的 job_id，并按照 next_action 持续调用 wait_desensitization_job；不要因等待超时或任务仍在运行而重复创建任务。queued、analyzing、generating、exporting 是非终态，completed、partial、failed、cancelled 是终态。partial 表示只有部分结果可用，必须如实告知并提供 report_path。取消请求发出后仍应等待终态。工具不会向 AI 返回文件正文或识别出的实体值；完成后只报告状态、计数、output_paths 和 report_path，不要声称已经阅读或核验脱敏后的正文。";
+const SERVER_INSTRUCTIONS: &str = "查询历史结果可用 list_desensitized_files(history=true)；保存前用 browse_output_directory 查询目录。有子目录且用户未指定位置时先询问用户，必要时 create_output_directory，随后传入绝对 output_dir；OUTPUT_DIRECTORY_REQUIRED 表示未创建任务，不要循环提交。目录和历史查询无需模型就绪。私匣用于在当前 Windows 或 macOS 电脑上脱敏用户明确指定或授权的本地文件。仅在用户要求处理具体文件时调用，不要自行扫描目录。Mac 首次实际调用会尝试自动启动同一应用包内的私匣，最多等待 15 秒；Windows 请先手动打开私匣。未登录时请用户完成登录再继续。models_ready 表示所需模型已安装，首次任务仍可能加载模型，加载失败会返回任务错误。首次调用先使用 desensitization_status；authenticated、authorization_valid、models_ready 和 ready 均为 true 后再创建任务。desensitize_file 和 desensitize_batch 只表示任务已进入队列，必须保存返回的 job_id，并按照 next_action 持续调用 wait_desensitization_job；不要因等待超时或任务仍在运行而重复创建任务。queued、analyzing、generating、exporting 是非终态，completed、partial、failed、cancelled 是终态。partial 表示只有部分结果可用，必须如实告知并提供 report_path。取消请求发出后仍应等待终态。工具不会向 AI 返回文件正文或识别出的实体值；完成后只报告状态、计数、output_paths 和 report_path，不要声称已经阅读或核验脱敏后的正文。";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct FileInput {
@@ -36,7 +68,7 @@ struct FileInput {
     )]
     source_path: String,
     #[schemars(
-        description = "可选的输出目录绝对路径。目录必须已经存在且可写；省略时写入源文件目录。私匣不会覆盖源文件或已有输出"
+        description = "可选的输出目录绝对路径。目录必须已经存在且可写；省略时使用私匣保存根目录；根目录有子文件夹时先询问用户选择 output_dir。私匣不会覆盖源文件或已有输出"
     )]
     output_dir: Option<String>,
 }
@@ -49,7 +81,7 @@ struct BatchInput {
     )]
     source_paths: Vec<String>,
     #[schemars(
-        description = "可选的输出目录绝对路径。目录必须已经存在且可写；省略时使用第一个源文件目录。私匣不会覆盖已有输出"
+        description = "可选的输出目录绝对路径。目录必须已经存在且可写；省略时使用私匣保存根目录；有子文件夹时必须先确认 output_dir。私匣不会覆盖已有输出"
     )]
     output_dir: Option<String>,
 }
@@ -314,6 +346,55 @@ impl DesensitizationMcp {
 
 #[tool_router]
 impl DesensitizationMcp {
+    #[tool(title="列出脱敏结果", description="查询脱敏文件的真实地址和历史导出记录。history=true 包括旧目录和外部另存，重启后仍可查询；exists=false 表示已移动或删除。返回元数据，不读取正文。无需模型加载，需有效登录。每页 30 项。", output_schema=rmcp::handler::server::common::schema_for_output::<Value>(), annotations(title="列出脱敏结果",read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    async fn list_desensitized_files(
+        &self,
+        Parameters(input): Parameters<OutputsInput>,
+    ) -> CallToolResult {
+        match self
+            .client
+            .request::<_, Value>(Method::ListOutputs, &input, DEFAULT_REQUEST_TIMEOUT)
+            .await
+        {
+            Ok(value) => Self::success(
+                &value,
+                "请向用户提供存在的文件路径；total 超出当前页时可增加 offset 查询下一页。",
+            ),
+            Err(error) => Self::failure(error),
+        }
+    }
+    #[tool(title="浏览保存目录", description="在用户授权的私匣保存根目录内列出真实文件和子文件夹，返回 root/path/relative/items/total。每页 30 项。有子目录且用户未指定保存位置时，先询问用户选择根目录、子目录或新建目录，再将绝对路径传入 output_dir。", output_schema=rmcp::handler::server::common::schema_for_output::<Value>(), annotations(title="浏览保存目录",read_only_hint=true,destructive_hint=false,idempotent_hint=true,open_world_hint=false))]
+    async fn browse_output_directory(
+        &self,
+        Parameters(input): Parameters<DirectoryInput>,
+    ) -> CallToolResult {
+        match self
+            .client
+            .request::<_, Value>(Method::BrowseDirectory, &input, DEFAULT_REQUEST_TIMEOUT)
+            .await
+        {
+            Ok(value) => Self::success(
+                &value,
+                "确认用户选择的位置后，将 path 或子目录的绝对路径用作 output_dir。",
+            ),
+            Err(error) => Self::failure(error),
+        }
+    }
+    #[tool(title="新建保存文件夹", description="按用户指示在保存根目录内创建一个子文件夹。已存在时返回错误，不覆盖或删除。成功后使用返回的 path 作为 output_dir。", output_schema=rmcp::handler::server::common::schema_for_output::<Value>(), annotations(title="新建保存文件夹",read_only_hint=false,destructive_hint=false,idempotent_hint=false,open_world_hint=false))]
+    async fn create_output_directory(
+        &self,
+        Parameters(input): Parameters<CreateDirectoryInput>,
+    ) -> CallToolResult {
+        match self
+            .client
+            .request::<_, Value>(Method::CreateDirectory, &input, DEFAULT_REQUEST_TIMEOUT)
+            .await
+        {
+            Ok(value) => Self::success(&value, "保存文件夹已创建。"),
+            Err(error) => Self::failure(error),
+        }
+    }
+
     #[tool(
         title = "检查私匣状态",
         description = "检查私匣桌面应用、租户登录授权和本机模型是否可用。创建任何任务前先调用；仅当 ready 为 true 时继续。",
@@ -760,6 +841,7 @@ fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::AuthExpired => "AUTH_EXPIRED",
         ErrorCode::ModelsNotReady => "MODELS_NOT_READY",
         ErrorCode::InvalidPath => "INVALID_PATH",
+        ErrorCode::OutputDirectoryRequired => "OUTPUT_DIRECTORY_REQUIRED",
         ErrorCode::UnsupportedFormat => "UNSUPPORTED_FORMAT",
         ErrorCode::ProtocolMismatch => "PROTOCOL_MISMATCH",
         ErrorCode::JobNotFound => "JOB_NOT_FOUND",
@@ -809,6 +891,16 @@ fn error_output(error: IntegrationError, context: CallContext) -> ErrorOutput {
             false,
             "请用户在私匣的模型管理页完成模型准备，然后重新检查状态",
             Some(retry_status_action("模型就绪后重新检查状态")),
+        ),
+        ErrorCode::OutputDirectoryRequired => (
+            true,
+            false,
+            "调用 browse_output_directory 查询文件夹，询问用户选择位置或新建子目录，再携带明确的 output_dir 提交；本次未创建任务",
+            Some(call_tool_action(
+                "browse_output_directory",
+                json!({}),
+                "先查询目录并请用户选择保存位置",
+            )),
         ),
         ErrorCode::InvalidPath => (
             true,
@@ -1107,6 +1199,15 @@ mod tests {
     #[test]
     fn all_tools_publish_chinese_metadata_annotations_and_output_schemas() {
         let expectations = [
+            ("list_desensitized_files", "列出脱敏结果", true, false, true),
+            ("browse_output_directory", "浏览保存目录", true, false, true),
+            (
+                "create_output_directory",
+                "新建保存文件夹",
+                false,
+                false,
+                false,
+            ),
             ("desensitization_status", "检查私匣状态", true, false, true),
             ("desensitize_file", "单文件脱敏", false, false, false),
             ("desensitize_batch", "批量文件脱敏", false, false, false),
@@ -1126,7 +1227,7 @@ mod tests {
                 true,
             ),
         ];
-        assert_eq!(DesensitizationMcp::tool_router().list_all().len(), 6);
+        assert_eq!(DesensitizationMcp::tool_router().list_all().len(), 9);
 
         for (name, title, read_only, destructive, idempotent) in expectations {
             let tool = tool(name);
@@ -1334,6 +1435,7 @@ mod tests {
             (ErrorCode::AuthRequired, true, true),
             (ErrorCode::AuthExpired, true, true),
             (ErrorCode::ModelsNotReady, true, true),
+            (ErrorCode::OutputDirectoryRequired, true, true),
             (ErrorCode::InvalidPath, true, false),
             (ErrorCode::UnsupportedFormat, false, true),
             (ErrorCode::ProtocolMismatch, true, true),
@@ -1362,6 +1464,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn directory_choice_recovery_asks_before_creating_a_task() {
+        let output = error_output(
+            IntegrationError::new(ErrorCode::OutputDirectoryRequired, "请选择保存目录"),
+            CallContext::Create,
+        );
+        assert!(!output.outcome_unknown);
+        assert!(output.recovery_action.contains("询问用户"));
+        assert!(output.recovery_action.contains("本次未创建任务"));
+        assert_eq!(
+            output.suggested_tool.unwrap().tool.as_deref(),
+            Some("browse_output_directory")
+        );
+    }
     #[test]
     fn create_transport_failure_never_invites_an_automatic_retry() {
         let output = error_output(

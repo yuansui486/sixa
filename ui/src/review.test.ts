@@ -7,6 +7,7 @@ import {
   retryReview,
   saveEntities,
   saveRegion,
+  undoReview,
 } from "./review";
 vi.mock("./api", async (original) => ({
   ...(await original<typeof import("./api")>()),
@@ -48,6 +49,25 @@ beforeEach(() => {
   useWorkbench.getState().setTask(fixture());
 });
 describe("review saves", () => {
+  it("serializes manual undo and retries a lost response without consuming another undo", async () => {
+    const before = fixture();
+    useWorkbench.setState({
+      undo: [
+        { entities: before.entities, regions: [], manualMutation: "manual" },
+      ],
+    });
+    vi.mocked(call)
+      .mockRejectedValueOnce(Error("响应丢失"))
+      .mockResolvedValueOnce({ ...before, revision: 2 });
+    await expect(undoReview()).rejects.toThrow("响应丢失");
+    expect(useWorkbench.getState().undo).toHaveLength(1);
+    expect(useWorkbench.getState().manualBusy).toBe(false);
+    const sent = vi.mocked(call).mock.calls[0][1];
+    await retryReview();
+    expect(vi.mocked(call).mock.calls[1][1]).toEqual(sent);
+    expect(useWorkbench.getState().undo).toHaveLength(0);
+    expect(useWorkbench.getState().task?.revision).toBe(2);
+  });
   it("does not let an old session response alter the new session saving counter", async () => {
     const replies: ((view: TaskView) => void)[] = [];
     vi.mocked(call).mockImplementation(

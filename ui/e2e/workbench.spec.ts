@@ -387,6 +387,19 @@ test.beforeEach(async ({ page }) => {
       get_file_directory: () => "C:\\test\\exports",
       set_file_directory: () => undefined,
       query_output_files: () => ({ items: [], total: 0 }),
+      browse_directory: (args: any) => ({
+        root: "C:\\test\\exports",
+        path: "C:\\test\\exports",
+        relative: args.query.relative || "",
+        items: [],
+        total: 0,
+      }),
+      create_output_directory: () => "C:/test/exports/new",
+      save_result: (args: any) => ({
+        id: "saved",
+        path: `C:/test/exports/${args.relative ? args.relative + "/" : ""}${args.name}`,
+        name: args.name,
+      }),
       export_recovery: () => undefined,
       list_tasks: () => [task.meta],
       query_tasks: () => ({
@@ -969,7 +982,7 @@ test("框选即时预览、区域删除和撤销不等待 IPC", async ({ page })
     await page.evaluate(() => window.__mock__.lastUpsert.expectedRevision),
   ).toBe(1);
   await expect(page.locator(`[data-region-id="${regionId}"]`)).toBeVisible();
-  await expect(page.getByRole("tab", { name: /手工区域/ })).toHaveAttribute(
+  await expect(page.getByRole("tab", { name: /手动脱敏/ })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -1004,7 +1017,7 @@ test("检查器按任务动作自动打开并保持紧凑桌面布局", async ({
   await page.goto("/");
   await selectPdf(page);
   const entityTab = page.getByRole("tab", { name: /实体复核/ });
-  const manualTab = page.getByRole("tab", { name: /手工区域/ });
+  const manualTab = page.getByRole("tab", { name: /手动脱敏/ });
   await expect(entityTab).toHaveAttribute("aria-selected", "true");
   await expect(page.getByLabel("选择张三")).toBeVisible();
   await manualTab.click();
@@ -1239,8 +1252,8 @@ test("较早的保存响应不会覆盖新输入，离页会保存最新内容",
   });
   await page.goto("/");
   await selectPdf(page);
-  await page.locator(".entity-replacement summary").click();
-  const input = page.getByLabel("张三的替换文字");
+  await page.locator(".entity-group-replacement summary").click();
+  const input = page.getByLabel("张三全部替换文字");
   await input.fill("甲");
   await expect
     .poll(() => page.evaluate(() => window.__mock__.calls.review_patch))
@@ -1621,8 +1634,8 @@ test("退出先保存修改，再确认停止任务并处理慢退出", async ({
   });
   await page.goto("/");
   await selectPdf(page);
-  await page.locator(".entity-replacement summary").click();
-  await page.getByLabel("张三的替换文字").fill("保存后退出");
+  await page.locator(".entity-group-replacement summary").click();
+  await page.getByLabel("张三全部替换文字").fill("保存后退出");
   await expect
     .poll(() => page.evaluate(() => window.__mock__.calls.review_patch))
     .toBe(1);
@@ -1728,8 +1741,8 @@ test("保存超时可以强制退出，但运行中任务仍需确认停止", as
   await page.goto("/");
   await selectPdf(page);
   await page.clock.install();
-  await page.locator(".entity-replacement summary").click();
-  await page.getByLabel("张三的替换文字").fill("尚未确认保存");
+  await page.locator(".entity-group-replacement summary").click();
+  await page.getByLabel("张三全部替换文字").fill("尚未确认保存");
   await page.evaluate(() =>
     window.__mock__.emit("app-close-request", {
       id: "force-save",
@@ -1775,12 +1788,14 @@ test("文件管理展示默认目录，筛选与空状态在桌面尺寸可用",
   await expect(
     page.getByText("C:\\test\\exports", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("还没有保存的处理结果")).toBeVisible();
+  await expect(page.getByText("当前文件夹没有符合条件的文件。")).toBeVisible();
   await page.getByLabel("搜索处理结果").fill("合同");
-  await expect(page.getByText("没有符合条件的文件")).toBeVisible();
+  await expect(page.getByText("当前文件夹没有符合条件的文件。")).toBeVisible();
   await page.getByLabel("筛选文件格式").selectOption("pdf");
   await page.getByRole("button", { name: "更改位置" }).click();
-  await expect(page.getByRole("status")).toContainText("保存位置已更新");
+  await expect
+    .poll(() => page.evaluate(() => window.__mock__.calls.set_file_directory))
+    .toBe(1);
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -1832,11 +1847,23 @@ test("有处理结果时所有文件操作均留在可见表格内", async ({ pa
           ...window.__mock__.task,
           meta: { ...window.__mock__.task.meta, state: "completed" },
         };
-      if (command === "query_output_files")
+      if (command === "browse_directory")
         return {
+          root: "C:/Users/用户/Documents/私匣/处理结果",
+          path: "C:/Users/用户/Documents/私匣/处理结果",
+          relative: "",
           total: 1,
           items: [
             {
+              directory: false,
+              modified: 1793000000,
+              output: {
+                id: "saved-1",
+                task_id: "task-pdf-1",
+                task_exists: true,
+                kind: "pdf",
+                source: "manual",
+              },
               id: "saved-1",
               task_id: "task-pdf-1",
               name: "项目合作协议_脱敏.pdf",
@@ -1862,7 +1889,7 @@ test("有处理结果时所有文件操作均留在可见表格内", async ({ pa
     page.getByText("项目合作协议_脱敏.pdf", { exact: true }),
   ).toBeVisible();
   const bounds = await page.locator(".table-scroll").boundingBox();
-  for (const label of ["预览", "打开文件", "所在文件夹", "另存为"]) {
+  for (const label of ["查看任务", "打开文件", "所在文件夹", "另存为"]) {
     const button = page.getByRole("button", { name: label, exact: true });
     await expect(button).toBeVisible();
     const box = await button.boundingBox();
@@ -1870,8 +1897,272 @@ test("有处理结果时所有文件操作均留在可见表格内", async ({ pa
       bounds!.x + bounds!.width + 1,
     );
   }
-  await page.getByRole("button", { name: "预览", exact: true }).click();
+  await page.getByRole("button", { name: "查看任务", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "已生成文件", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
+});
+
+test("@workflow 同词合并且仍可逐处选择", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    window.__mock__.task.entities.push({
+      ...window.__mock__.task.entities[0],
+      id: "repeat",
+      selected: false,
+    });
+  });
+  await selectPdf(page);
+  await expect(page.locator(".entity-group")).toHaveCount(1);
+  await expect(page.locator(".entity-group-heading")).toContainText("共 2 处");
+  expect(
+    await page
+      .getByLabel("选择张三", { exact: true })
+      .evaluate((el: HTMLInputElement) => el.indeterminate),
+  ).toBe(true);
+  await page.getByLabel("选择张三", { exact: true }).check();
+  await page.locator(".entity-group-heading button").click();
+  await expect(page.getByLabel("第2处张三的选择状态")).toBeChecked();
+  await page.getByLabel("第2处张三的选择状态").uncheck();
+  expect(
+    await page
+      .getByLabel("选择张三", { exact: true })
+      .evaluate((el: HTMLInputElement) => el.indeterminate),
+  ).toBe(true);
+});
+
+test("@workflow 保存选择子目录并返回文件管理，取消不导出", async ({ page }) => {
+  await page.addInitScript(() => {
+    const old = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === "browse_directory")
+        return {
+          root: "C:/结果",
+          path: `C:/结果/${args.query.relative || ""}`,
+          relative: args.query.relative || "",
+          items: args.query.relative
+            ? []
+            : [
+                {
+                  name: "项目甲",
+                  path: "C:/结果/项目甲",
+                  directory: true,
+                  size: 0,
+                  modified: 0,
+                  output: null,
+                },
+              ],
+          total: args.query.relative ? 0 : 1,
+        };
+      return old(command, args);
+    };
+  });
+  await page.goto("/");
+  await selectPdf(page);
+  await page.getByRole("button", { name: "生成脱敏文件", exact: true }).click();
+  await page.getByRole("button", { name: "保存并返回", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "保存脱敏文件" });
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  expect(
+    await page.evaluate(() => window.__mock__.calls.save_result || 0),
+  ).toBe(0);
+  await page.getByRole("button", { name: "保存并返回", exact: true }).click();
+  await dialog.getByRole("button", { name: "项目甲", exact: true }).click();
+  await expect(dialog).toContainText("C:/结果/项目甲");
+  await dialog.getByRole("button", { name: "保存到当前文件夹" }).click();
+  await expect(page).toHaveURL(/files\?dir=/);
+  await expect(
+    page.getByRole("heading", { name: "文件管理", exact: true }),
+  ).toBeVisible();
+  expect(await page.evaluate(() => window.__mock__.calls.save_result)).toBe(1);
+});
+
+test("@workflow Word 内容预览同步双向滚动和选词", async ({ page }) => {
+  await page.addInitScript(() => {
+    const old = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === "office_preview")
+        return {
+          revision: 1,
+          layout_available: false,
+          reason: "文档采用内容预览",
+          warnings: [],
+          images: [],
+          anchors: Array.from({ length: 500 }, (_, i) => ({
+            id: `sixa_text_body_${i}`,
+            text: args.result
+              ? `段落${i} 某公司公开资料`
+              : `段落${i} 青岛市企业公开宣传资料，文字有一定长度。`.repeat(3),
+            display: { start: i * 100, end: i * 100 + 20 },
+            label: "正文",
+            available_in_layout: false,
+          })),
+        };
+      const result = await old(command, args);
+      if (command === "analyze_file") {
+        result.extension = "docx";
+        result.meta.kind = "docx";
+        result.meta.state = "completed";
+        result.meta.display_name = "测试.docx";
+      }
+      if (command === "document_manifest") result.kind = "docx";
+      return result;
+    };
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "选择本机文件" }).click();
+  await page.getByRole("button", { name: "对比", exact: true }).click();
+  const source = page
+    .locator(".preview-pane")
+    .first()
+    .getByLabel("完整分块内容");
+  const result = page
+    .locator(".preview-pane")
+    .last()
+    .getByLabel("完整分块内容");
+  await expect(source).toBeVisible();
+  await expect(result).toBeVisible();
+  const visible = (el: HTMLElement) => {
+    const top = el.getBoundingClientRect().top;
+    return [...el.querySelectorAll<HTMLElement>("[data-content-anchor]")].find(
+      (r) => r.getBoundingClientRect().bottom > top + 2,
+    )?.dataset.contentAnchor;
+  };
+  await source.evaluate((el) => {
+    el.scrollTop = 2300;
+  });
+  await expect
+    .poll(async () => {
+      const a = await source.evaluate(visible);
+      return !!a && a === (await result.evaluate(visible));
+    })
+    .toBe(true);
+  await result.evaluate((el) => {
+    el.scrollTop = 4400;
+  });
+  await expect
+    .poll(async () => {
+      const a = await result.evaluate(visible);
+      return !!a && a === (await source.evaluate(visible));
+    })
+    .toBe(true);
+  await page.getByLabel("同步滚动").uncheck();
+  const before = await result.evaluate((el) => el.scrollTop);
+  await source.evaluate((el) => {
+    el.scrollTop = 800;
+  });
+  await page.waitForTimeout(150);
+  expect(await result.evaluate((el) => el.scrollTop)).toBe(before);
+  expect(await page.locator(".sixa-docx-content-row").count()).toBeLessThan(60);
+});
+
+test("@workflow Word 选词快速替换、保存规则及撤销无需切页", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const old = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = async (command: string, args: any) => {
+      if (command === "office_preview")
+        return {
+          revision: window.__mock__.task.revision,
+          layout_available: false,
+          reason: "内容预览",
+          warnings: [],
+          images: [],
+          anchors: [
+            {
+              id: "word_0",
+              text: "青岛市",
+              display: { start: 0, end: 3 },
+              label: "正文",
+              available_in_layout: false,
+            },
+          ],
+        };
+      if (command === "find_text")
+        return {
+          revision: window.__mock__.task.revision,
+          items: [
+            {
+              id: "match",
+              display: { start: 0, end: 3 },
+              context: "青岛市",
+              conflicts: 0,
+              locatable: true,
+            },
+          ],
+        };
+      if (command === "apply_text") {
+        window.__mock__.calls.apply_text =
+          (window.__mock__.calls.apply_text || 0) + 1;
+        const task = window.__mock__.task;
+        task.revision++;
+        task.entities = [
+          {
+            id: "manual",
+            entity_type: "手动文字",
+            type_label: "手动文字",
+            text: "青岛市",
+            selected: true,
+            replacement: args.request.replacement,
+            source: "手动添加",
+            score: 1,
+            display: { start: 0, end: 3 },
+          },
+        ];
+        return task;
+      }
+      if (command === "save_quick_rule") {
+        window.__mock__.calls.save_quick_rule = 1;
+        return;
+      }
+      if (command === "undo_text") {
+        window.__mock__.calls.undo_text = 1;
+        const task = window.__mock__.task;
+        task.revision++;
+        task.entities = [];
+        return task;
+      }
+      const value = await old(command, args);
+      if (command === "analyze_file") {
+        value.extension = "docx";
+        value.meta.kind = "docx";
+        value.text = "青岛市";
+        value.entities = [];
+        value.regions = [];
+        window.__mock__.task = value;
+      }
+      if (command === "document_manifest") value.kind = "docx";
+      return value;
+    };
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "选择本机文件" }).click();
+  const text = page.locator(".sixa-docx-content-row > div").first();
+  await expect(text).toHaveText("青岛市");
+  await text.evaluate((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await expect(page.getByLabel("查找脱敏文字")).toHaveValue("青岛市");
+  await page.getByLabel("手动替换文字").fill("某地");
+  await page.getByLabel("同时保存为规则，供以后使用").check();
+  await page.getByLabel("快捷规则名称").fill("客户地点");
+  await page.getByRole("button", { name: "查找", exact: true }).click();
+  await expect(page.getByText("找到 1 处")).toBeVisible();
+  await page.getByRole("button", { name: "全部替换", exact: true }).click();
+  await expect(page.getByText("已替换 1 处并保存规则。")).toBeVisible();
+  expect(await page.evaluate(() => window.__mock__.calls.apply_text)).toBe(1);
+  expect(await page.evaluate(() => window.__mock__.calls.save_quick_rule)).toBe(
+    1,
+  );
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => window.__mock__.calls.undo_text))
+    .toBe(1);
+  await expect(page).toHaveURL(/\/$/);
 });

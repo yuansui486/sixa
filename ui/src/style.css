@@ -2035,3 +2035,125 @@ mark.focused {
 .files-table td:nth-child(2) {
   white-space: nowrap;
 }
+.save-dialog {
+  width: min(640px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  border: 1px solid #dce3e8;
+  border-radius: 12px;
+  padding: 24px;
+  color: inherit;
+  background: white;
+}
+.save-dialog::backdrop {
+  background: #172b3d66;
+}
+.save-dialog label,
+.quick-redaction label {
+  display: block;
+  margin: 12px 0;
+}
+.save-dialog label input,
+.quick-redaction label input:not([type="checkbox"]) {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+}
+.save-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+.save-folders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+  margin: 16px 0;
+}
+.directory-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.file-highlight {
+  background: #e6f3ef;
+}
+.entity-group {
+  border-bottom: 1px solid #dce3e0;
+  padding: 12px;
+  min-width: 0;
+}
+.entity-group-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.entity-group .entity-copy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.entity-group button.entity-copy {
+  background: transparent;
+  color: inherit;
+  border: 0;
+  box-shadow: none;
+  text-align: left;
+  padding: 0;
+}
+.entity-group .entity-context {
+  white-space: normal;
+  overflow: visible;
+  display: block;
+}
+.entity-group .entity-item {
+  padding: 10px 0;
+}
+.entity-group-replacement {
+  margin: 8px 0 0 26px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.entity-group-replacement input {
+  width: 100%;
+}
+.quick-redaction {
+  padding: 14px;
+  border-bottom: 1px solid #dce3e0;
+  flex-shrink: 0;
+}
+.quick-redaction h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+.quick-redaction p {
+  font-size: 13px;
+}
+.quick-redaction .quick-rule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.quick-matches {
+  max-height: 180px;
+  overflow: auto;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+.quick-matches li {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.sync-scroll-toggle {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+}

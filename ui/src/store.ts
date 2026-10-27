@@ -2,13 +2,14 @@ import { create } from "zustand";
 import type { Entity, Region, TaskView } from "./api";
 interface Workbench {
   task: TaskView | null;
-  undo: { entities: Entity[]; regions: Region[] }[];
+  undo: { entities: Entity[]; regions: Region[]; manualMutation?: string }[];
   generation: number;
   saving: number;
   saveError: string;
   dirty: boolean;
   batchId: string | null;
   pendingTaskId: string | null;
+  manualBusy: boolean;
   setTask: (task: TaskView | null) => void;
   setBatchId: (id: string | null) => void;
   markSaved: (task?: TaskView, generation?: number) => void;
@@ -27,6 +28,7 @@ export const useWorkbench = create<Workbench>((set) => ({
   dirty: false,
   batchId: null,
   pendingTaskId: null,
+  manualBusy: false,
   setTask: (task) =>
     set((s) => ({
       task,

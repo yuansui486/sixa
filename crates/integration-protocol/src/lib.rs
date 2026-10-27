@@ -21,6 +21,9 @@ pub enum Method {
     GetJob,
     WaitJob,
     CancelJob,
+    ListOutputs,
+    BrowseDirectory,
+    CreateDirectory,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,6 +134,7 @@ pub enum ErrorCode {
     AuthExpired,
     ModelsNotReady,
     InvalidPath,
+    OutputDirectoryRequired,
     UnsupportedFormat,
     ProtocolMismatch,
     JobNotFound,

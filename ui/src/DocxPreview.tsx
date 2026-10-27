@@ -24,6 +24,7 @@ import {
   bindAnchors,
   bindImages,
   contentChunks,
+  nearestAnchor,
   sanitizeRendered,
   textParts,
   type AnchorMap,
@@ -34,12 +35,15 @@ import {
 import "./docx-preview.css";
 
 export type { DocxScrollAnchor } from "./docx-preview-model";
+const NO_ENTITIES: Entity[] = [];
 export interface DocxPreviewProps {
   task: TaskView;
   result: boolean;
   completed: boolean;
   focusedId?: string | null;
   onFocusEntity: (id: string) => void;
+  onSelectText?: (text: string) => void;
+  locateSpan?: { start: number; end: number; token: number };
   onOpenImage: (index: number) => void;
   zoom?: number;
   fitMode?: "width" | "page";
@@ -371,14 +375,23 @@ export function DocxPreview(props: DocxPreviewProps) {
     const target = host.current;
     if (!anchor || !active || !target) return;
     const pages = [...active.body.querySelectorAll("section.sixa-word")];
-    const choices = active.bindings.get(anchor.anchorId);
+    const choices = active.bindings.get(
+      nearestAnchor(anchor.anchorId, [...active.bindings.keys()]) ?? "",
+    );
     const marker =
       choices?.find(
         (binding) =>
           pages.indexOf(binding.marker.closest("section.sixa-word")!) ===
           anchor.page,
       )?.marker ?? choices?.[0]?.marker;
-    if (!marker) return;
+    if (!marker) {
+      const scroller = scrollContainer(target);
+      suppressScrollUntil.current = performance.now() + 100;
+      scroller.scrollTop =
+        (anchor.progress ?? 0) *
+        Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      return;
+    }
     const distance =
       anchor.fraction !== undefined
         ? Math.max(0, Math.min(1, anchor.fraction)) *
@@ -387,6 +400,42 @@ export function DocxPreview(props: DocxPreviewProps) {
     suppressScrollUntil.current = performance.now() + 100;
     scrollMarker(target, marker, distance);
   }, [props.scrollAnchor, rendered]);
+  useEffect(() => {
+    if (!props.locateSpan || !session.current || !host.current) return;
+    const span = props.locateSpan;
+    const anchor = session.current.sourceAnchors.find(
+      (a) => a.display.start < span.end && a.display.end > span.start,
+    );
+    const binding = anchor && session.current.bindings.get(anchor.id)?.[0];
+    if (binding) scrollMarker(host.current, binding.marker, -60);
+    else setOtherOpen(true);
+  }, [props.locateSpan, rendered]);
+
+  useEffect(() => {
+    const root = host.current?.shadowRoot;
+    if (!root || !props.onSelectText) return;
+    const select = () => {
+      const getter = (
+        root as ShadowRoot & { getSelection?: () => Selection | null }
+      ).getSelection;
+      const selection = getter?.call(root) ?? window.getSelection();
+      const text = selection?.toString().trim();
+      if (
+        text &&
+        text.length <= 4096 &&
+        selection?.anchorNode &&
+        (root.contains(selection.anchorNode) ||
+          selection.anchorNode === host.current)
+      )
+        current.current.onSelectText?.(text);
+    };
+    root.addEventListener("mouseup", select);
+    root.addEventListener("keyup", select);
+    return () => {
+      root.removeEventListener("mouseup", select);
+      root.removeEventListener("keyup", select);
+    };
+  }, [rendered, props.onSelectText]);
 
   useEffect(() => {
     const page = props.pageRequest?.page;
@@ -444,6 +493,9 @@ export function DocxPreview(props: DocxPreviewProps) {
         page,
         offset,
         fraction,
+        progress:
+          scroller.scrollTop /
+          Math.max(1, scroller.scrollHeight - scroller.clientHeight),
       });
     };
     const scroll = () => {
@@ -549,7 +601,11 @@ export function DocxPreview(props: DocxPreviewProps) {
         (fullContent ? (
           <VirtualContent
             anchors={fallbackAnchors}
-            entities={documentResult ? [] : task.entities}
+            scrollAnchor={props.scrollAnchor}
+            onScrollAnchor={props.onScrollAnchor}
+            onSelectText={props.onSelectText}
+            locateSpan={props.locateSpan}
+            entities={documentResult ? NO_ENTITIES : task.entities}
             draft={result && !documentResult}
             focusedId={focusedId}
             onFocus={props.onFocusEntity}
@@ -565,7 +621,11 @@ export function DocxPreview(props: DocxPreviewProps) {
             {otherOpen && (
               <VirtualContent
                 anchors={fallbackAnchors}
-                entities={documentResult ? [] : task.entities}
+                scrollAnchor={props.scrollAnchor}
+                onScrollAnchor={props.onScrollAnchor}
+                onSelectText={props.onSelectText}
+                locateSpan={props.locateSpan}
+                entities={documentResult ? NO_ENTITIES : task.entities}
                 draft={result && !documentResult}
                 focusedId={focusedId}
                 onFocus={props.onFocusEntity}
@@ -656,7 +716,15 @@ function VirtualContent({
   draft,
   focusedId,
   onFocus,
+  scrollAnchor,
+  onScrollAnchor,
+  onSelectText,
+  locateSpan,
 }: {
+  locateSpan?: { start: number; end: number; token: number };
+  scrollAnchor?: DocxScrollAnchor | null;
+  onScrollAnchor?: (anchor: DocxScrollAnchor) => void;
+  onSelectText?: (text: string) => void;
   anchors: OfficeAnchor[];
   entities: Entity[];
   draft: boolean;
@@ -710,6 +778,79 @@ function VirtualContent({
       setScrollTop(offsets[index]);
     }
   }, [focusedId, chunks]);
+  useEffect(() => {
+    if (!locateSpan || !viewport.current) return;
+    const index = chunks.findIndex(
+      (c) =>
+        c.display.start < locateSpan.end && c.display.end > locateSpan.start,
+    );
+    if (index >= 0) {
+      viewport.current.scrollTop = offsets[index];
+      setScrollTop(offsets[index]);
+    }
+  }, [locateSpan, chunks]);
+  const suppressed = useRef(false);
+  const ownsScroll = useRef(false);
+  const frame = useRef(0);
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
+  useLayoutEffect(() => {
+    if (!scrollAnchor || !viewport.current) return;
+    ownsScroll.current = false;
+    const key = nearestAnchor(
+      scrollAnchor.anchorId,
+      chunks.map((c) => c.id),
+    );
+    const index = chunks.findIndex((c) => c.id === key);
+    const same = chunks
+      .map((c, i) => (c.id === key ? i : -1))
+      .filter((i) => i >= 0);
+    const end = offsets[same[same.length - 1] + 1];
+    const target =
+      index < 0
+        ? (scrollAnchor.progress ?? 0) *
+          Math.max(
+            0,
+            viewport.current.scrollHeight - viewport.current.clientHeight,
+          )
+        : offsets[index] +
+          (end - offsets[index]) * (scrollAnchor.fraction || 0);
+    suppressed.current = true;
+    viewport.current.scrollTop = target;
+    setScrollTop(target);
+    cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => {
+      suppressed.current = false;
+    });
+  }, [scrollAnchor, chunks, offsets]);
+  const emitAnchor = (top: number) => {
+    if (!viewport.current) return;
+    const index = Math.max(
+      0,
+      chunks.findIndex((_, i) => offsets[i + 1] > top),
+    );
+    const chunk = chunks[index];
+    if (!chunk) return;
+    const indices = chunks
+      .map((c, i) => (c.id === chunk.id ? i : -1))
+      .filter((i) => i >= 0);
+    const start = offsets[indices[0]],
+      end = offsets[indices[indices.length - 1] + 1];
+    onScrollAnchor?.({
+      anchorId: chunk.id,
+      page: 0,
+      fraction: (top - start) / Math.max(1, end - start),
+      progress:
+        top /
+        Math.max(
+          1,
+          viewport.current.scrollHeight - viewport.current.clientHeight,
+        ),
+    });
+  };
+  useLayoutEffect(() => {
+    if (ownsScroll.current && !suppressed.current && viewport.current)
+      emitAnchor(viewport.current.scrollTop);
+  }, [offsets]);
   const first = Math.max(
     0,
     offsets.findIndex(
@@ -725,7 +866,17 @@ function VirtualContent({
     <div
       className="sixa-docx-content"
       ref={viewport}
-      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      onMouseUp={() => {
+        const text = window.getSelection()?.toString().trim();
+        if (text && text.length <= 4096) onSelectText?.(text);
+      }}
+      onScroll={(event) => {
+        const top = event.currentTarget.scrollTop;
+        setScrollTop(top);
+        if (suppressed.current) return;
+        ownsScroll.current = true;
+        emitAnchor(top);
+      }}
       aria-label="完整分块内容"
     >
       <div style={{ height: offsets.at(-1), position: "relative" }}>
@@ -784,6 +935,7 @@ function ContentRow({
     <div
       ref={row}
       className="sixa-docx-content-row"
+      data-content-anchor={anchor.id}
       style={{ position: "absolute", top, left: 0, right: 0 } as CSSProperties}
     >
       <span className="sixa-docx-content-label">{anchor.label}</span>

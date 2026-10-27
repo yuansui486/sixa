@@ -1,4 +1,4 @@
-import { call, message, selection, type Region } from "./api";
+import { call, message, selection, type Region, type TaskView } from "./api";
 import { useWorkbench } from "./store";
 
 // A single queue survives route changes. Every mutation obtains its revision at
@@ -122,10 +122,86 @@ export async function retryReview(): Promise<void> {
   while (deferred.length) await enqueue(deferred.shift()!);
   await flushReview();
 }
+export async function applyTextMatches(
+  id: string,
+  request: {
+    query: string;
+    replacement: string;
+    match_ids: string[];
+    expected_revision: number;
+    mutation_id: string;
+    allow_conflicts: boolean;
+  },
+): Promise<TaskView> {
+  let result: TaskView | undefined;
+  await enqueue(async () => {
+    const state = useWorkbench.getState();
+    if (state.task?.meta.id !== id) throw Error("任务已切换，请重新打开原任务");
+    const before = state.task;
+    result = await call("apply_text", { id, request });
+    if (useWorkbench.getState().task?.meta.id === id)
+      useWorkbench.setState((s) => ({
+        task: result!,
+        dirty: false,
+        generation: s.generation + 1,
+        undo: [
+          ...s.undo.slice(-19),
+          {
+            entities: before.entities,
+            regions: before.regions,
+            manualMutation: request.mutation_id,
+          },
+        ],
+      }));
+  });
+  return result!;
+}
 
 export async function undoReview(): Promise<void> {
+  if (useWorkbench.getState().manualBusy) return;
+  useWorkbench.setState({ manualBusy: true });
+  try {
+    await performUndo();
+  } finally {
+    useWorkbench.setState({ manualBusy: false });
+  }
+}
+
+async function performUndo(): Promise<void> {
+  const taskId = useWorkbench.getState().task?.meta.id;
+  const savedEpoch = epoch;
+  await flushReview();
   const before = useWorkbench.getState().task;
-  if (!before || !useWorkbench.getState().undo.length) return;
+  if (
+    savedEpoch !== epoch ||
+    !before ||
+    before.meta.id !== taskId ||
+    !useWorkbench.getState().undo.length
+  )
+    return;
+  const manual = useWorkbench.getState().undo.at(-1)?.manualMutation;
+  if (manual) {
+    await enqueue(async () => {
+      if (useWorkbench.getState().task?.meta.id !== taskId)
+        throw Error("任务已切换，请重新打开原任务");
+      const task = await call("undo_text", {
+        id: before.meta.id,
+        mutationId: manual,
+        expectedRevision: before.revision,
+      });
+      if (
+        savedEpoch === epoch &&
+        useWorkbench.getState().task?.meta.id === taskId
+      )
+        useWorkbench.setState((s) => ({
+          task,
+          undo: s.undo.slice(0, -1),
+          dirty: false,
+          generation: s.generation + 1,
+        }));
+    });
+    return;
+  }
   useWorkbench.getState().undoLast();
   const after = useWorkbench.getState().task!;
   for (const region of before.regions)

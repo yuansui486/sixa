@@ -1,3 +1,4 @@
+pub mod directory;
 pub mod files;
 #[cfg(target_os = "macos")]
 mod local_key;
@@ -233,6 +234,12 @@ impl Store {
     pub fn save_review<T: serde::Serialize>(&self, id: Uuid, review: &T) -> Result<()> {
         self.save_sidecar(id, "review.enc", review)
     }
+    pub fn save_manual_history<T: serde::Serialize>(&self, id: Uuid, history: &T) -> Result<()> {
+        self.save_sidecar(id, "manual-history.enc", history)
+    }
+    pub fn manual_history<T: serde::de::DeserializeOwned>(&self, id: Uuid) -> Result<Option<T>> {
+        self.sidecar(id, "manual-history.enc")
+    }
     pub fn review<T: serde::de::DeserializeOwned>(&self, id: Uuid) -> Result<Option<T>> {
         self.sidecar(id, "review.enc")
     }
@@ -359,6 +366,16 @@ impl Store {
     }
     pub fn save_policy(&self, p: &Policy) -> Result<()> {
         self.put("policy", &p.entity_type, p)
+    }
+    pub fn save_quick_rule(&mut self, rule: &Rule, replacement: &str) -> Result<()> {
+        let tx = self.db.transaction().map_err(db_err)?;
+        let policy = Policy {
+            entity_type: rule.entity_type.clone(),
+            replacement: replacement.into(),
+        };
+        tx.execute("INSERT INTO config VALUES('rule',?1,?2) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data", params![rule.id.to_string(), serde_json::to_string(rule).map_err(json_err)?]).map_err(db_err)?;
+        tx.execute("INSERT INTO config VALUES('policy',?1,?2) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data", params![policy.entity_type, serde_json::to_string(&policy).map_err(json_err)?]).map_err(db_err)?;
+        tx.commit().map_err(db_err)
     }
     pub fn desktop_preferences(&self) -> Result<domain::DesktopPreferences> {
         Ok(self

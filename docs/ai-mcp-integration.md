@@ -59,6 +59,9 @@ AI 不应自行扫描目录、猜测文件路径或处理用户没有明确指�
 
 | 工具 | 用途 |
 | --- | --- |
+| `list_desensitized_files` | 查询当前目录或全部历史导出的文件地址，支持分页；不依赖模型就绪 |
+| `browse_output_directory` | 浏览保存根目录或子目录的实际文件和文件夹 |
+| `create_output_directory` | 按用户指示在根目录内新建子文件夹 |
 | `desensitization_status` | 检查桌面会话、租户授权、模型、协议版本和支持格式 |
 | `desensitize_file` | 创建单文件自动脱敏任务，立即返回 `job_id` |
 | `desensitize_batch` | 创建 1-20 个文件的批量任务，立即返回 `job_id` |
@@ -66,7 +69,7 @@ AI 不应自行扫描目录、猜测文件路径或处理用户没有明确指�
 | `wait_desensitization_job` | 等待任务变化，单次最长 60 秒 |
 | `cancel_desensitization_job` | 取消排队中或执行中的任务 |
 
-`desensitize_file` 接收 `source_path` 和可选的 `output_dir`；`desensitize_batch` 接收 `source_paths` 和可选的 `output_dir`。所有路径必须是当前系统用户可访问的绝对路径，指定的输出目录必须已经存在。未指定输出目录时使用源文件目录。
+`desensitize_file` 接收 `source_path` 和可选的 `output_dir`；`desensitize_batch` 接收 `source_paths` 和可选的 `output_dir`。所有路径必须是当前系统用户可访问的绝对路径，指定的输出目录必须已经存在。未指定输出目录时使用“文件管理”配置的保存根目录。根目录存在子文件夹时返回 `OUTPUT_DIRECTORY_REQUIRED`，不会创建任务：先查询目录并询问用户选择根目录、子目录或新建目录，再携带明确的 `output_dir` 提交。显式指定的外部绝对目录仍然支持。
 
 单文件默认命名为 `原文件名_已脱敏.扩展名`，批量结果默认命名为 `批量_已脱敏.zip`。源文件和已有结果不会被覆盖；名称冲突时自动追加 `(2)`、`(3)`。同目录还会生成只含任务状态、实体类型计数和输出路径的 JSON 报告，不包含正文或识别出的实体值。
 
@@ -81,6 +84,7 @@ AI 不应自行扫描目录、猜测文件路径或处理用户没有明确指�
 | `AUTH_REQUIRED` | 在私匣中登录，再重新检查状态 |
 | `AUTH_EXPIRED` | 联网刷新登录和租户授权，再重新检查状态 |
 | `MODELS_NOT_READY` | 在“模型管理”中准备对应模型，再重新检查状态 |
+| `OUTPUT_DIRECTORY_REQUIRED` | 查询目录并询问用户保存到哪里，明确 `output_dir` 后重新提交；此响应保证未创建任务 |
 | `INVALID_PATH` | 请用户提供存在且可访问的绝对路径；不要自行扫描目录 |
 | `UNSUPPORTED_FORMAT` | 根据状态工具返回的支持格式，请用户更换文件 |
 | `PROTOCOL_MISMATCH` | 安装同一版本的私匣桌面应用和 MCP 程序 |
@@ -99,8 +103,8 @@ macOS 使用 `/private/tmp/cn.shierkeji.sixa.<uid>/mcp.sock`，目录权限为 `
 ## 开发验证（不下载生产模型）
 
 - `cargo test -p integration-protocol -p sixa-mcp`：协议、提示、路径和 Mac socket 权限/生命周期测试。
-- `node scripts/mcp-smoke.mjs --metadata <sixa-mcp 路径>`：从真实安装包启动程序，检查握手、六个工具及中文元数据，确认关闭标准输入后退出。
-- Mac 上 `node scripts/mcp-smoke.mjs --desktop target/debug/sixa target/debug/sixa-mcp`：隔离数据目录，实际调用未登录桌面，验证权限门禁、六个工具、异常帧和崩溃重连。只在调试构建支持测试目录，不注入登录或模型旁路。
+- `node scripts/mcp-smoke.mjs --metadata <sixa-mcp 路径>`：从真实安装包启动程序，检查握手、九个工具及中文元数据，确认关闭标准输入后退出。
+- Mac 上 `node scripts/mcp-smoke.mjs --desktop target/debug/sixa target/debug/sixa-mcp`：隔离数据目录，实际调用未登录桌面，验证权限门禁、九个工具、异常帧和崩溃重连。只在调试构建支持测试目录，不注入登录或模型旁路。
 - Mac 上 `node scripts/mcp-smoke.mjs --launch target/debug/sixa-mcp`：使用离线测试应用包，实际调用 LaunchServices，检查中文空格路径、并发自动启动、启动超时及冷却；不调用真实模型或鉴权服务。
 - CI 不下载生产模型、不访问 OSS。已登录并安装模型的真实 Mac 仍需验收 PDF、Word、图片和批量的完整输出、报告、取消与部分失败；通信检查不能替代模型推理验收。
 
@@ -109,3 +113,16 @@ macOS 使用 `/private/tmp/cn.shierkeji.sixa.<uid>/mcp.sock`，目录权限为 `
 安装器会先处理正在运行的私匣主程序，再自动停止当前用户、当前安装目录中的全部 `sixa-mcp.exe` 实例，等待程序文件释放后继续。AI 客户端可以保持打开；升级后请启动私匣，并在 AI 客户端中重新连接私匣 MCP。升级期间已有 MCP 连接会断开，正在运行的任务应在升级前完成。
 
 如果客户端持续自动重启 MCP，或者文件因权限、安全软件而无法访问，安装器会停止操作并提供“重试／取消”。请暂时停用客户端中的私匣 MCP 连接，再点击“重试”。静默安装遇到 MCP 清理失败时返回退出码 `10`，不会跳过该文件并报告成功。
+
+
+## 文件管理与历史查询（1.0.13）
+
+桌面生成结果后先预览，点击“保存并返回”选择目录；历史页和批量页使用同一个保存窗口。MCP 为自动处理，仍在完成后直接导出到已确认的目录，不弹桌面保存窗口。
+
+- `browse_output_directory({"relative":"","offset":0})`：根目录首页。`relative` 为根目录内相对路径；每页最多 30 项，返回 `root/path/relative/items/total`。不递归扫描，不打开正文。文件夹 `directory=true`。
+- `create_output_directory({"relative":"客户","name":"项目甲"})`：在已有的“客户”目录中新建“项目甲”；成功返回可直接用作 `output_dir` 的绝对 `path`。不支持越界路径，不覆盖同名目录。通信中断时先浏览目录确认结果，不盲目重复新建。
+- `list_desensitized_files({"history":false,"relative":"客户/项目甲","offset":0,"search":"合同"})`：当前目录的导出记录；`history=true` 查询所有历史位置，包括外部另存与旧根目录。返回 `items/total`，每页 30 项。以 `exists` 判断文件是否仍在，以 `task_exists` 判断是否还能打开原任务。
+
+文件管理页面按实际目录展示；MCP 历史查询按持久化导出记录展示，两者用途不同。不存在的旧文件保留在历史查询中，不会在当前目录伪装成可用文件。文件名和完整路径也是用户信息，仅在用户要求查询结果时使用这些工具。目录查询需要有效登录，但无需模型加载。
+
+典型对话顺序：用户要求处理文件 → 查询保存目录 → 如有子目录且用户没有指定，询问位置 → 必要时新建文件夹 → 检查模型状态 → 使用明确的 `output_dir` 创建任务 → 轮询同一个 `job_id` → 提供实际输出路径。只查询历史文件时，直接查询历史，不运行识别模型。

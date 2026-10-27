@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { LoaderCircle, Square, FileText } from "lucide-react";
 import {
   call,
@@ -14,7 +14,7 @@ import {
 import { useWorkbench } from "./store";
 import { flushReview } from "./review";
 import { useJobs, runningJob } from "./jobs";
-import { rememberDirectory } from "./preferences";
+import { SaveResult } from "./SaveResult";
 import { FileSaveNotice } from "./Files";
 
 export function Batch() {
@@ -23,6 +23,7 @@ export function Batch() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [savedPath, setSavedPath] = useState("");
+  const [saving, setSaving] = useState(false);
   const [filter, setFilter] = useState("all");
   const navigate = useNavigate();
   const client = useQueryClient();
@@ -110,6 +111,17 @@ export function Batch() {
   }
   return (
     <>
+      {saving && id && (
+        <SaveResult
+          target={{ id, name: "批量_脱敏.zip" }}
+          onClose={() => setSaving(false)}
+          onSaved={(where) => {
+            setSaving(false);
+            if (where.external) setSavedPath(where.path);
+            else navigate(`/files?dir=${encodeURIComponent(where.relative)}`);
+          }}
+        />
+      )}
       <header>
         <h1>批量处理</h1>
         <p>逐份检查后统一生成，已完成的文件可以随时保存。</p>
@@ -319,14 +331,7 @@ export function Batch() {
                 title={!completed ? "生成成功后可以导出" : undefined}
                 onClick={() =>
                   void run(async () => {
-                    const path = await save({
-                      defaultPath: "批量脱敏结果.zip",
-                    });
-                    if (path) {
-                      await call("export_batch", { id: id!, path });
-                      rememberDirectory(path);
-                      setSavedPath(path);
-                    }
+                    setSaving(true);
                   })
                 }
               >

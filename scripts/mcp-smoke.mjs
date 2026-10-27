@@ -12,7 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const children = new Set();
 const toolNames = ['desensitization_status', 'desensitize_file', 'desensitize_batch',
-  'get_desensitization_job', 'wait_desensitization_job', 'cancel_desensitization_job'];
+  'get_desensitization_job', 'wait_desensitization_job', 'cancel_desensitization_job', 'list_desensitized_files', 'browse_output_directory', 'create_output_directory'];
 
 function start(executable, args, env) {
   const child = spawn(resolve(executable), args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -98,7 +98,7 @@ try {
   if (mode === '--metadata') {
     const mcp = await client(executable);
     await mcp.close();
-    console.log('PASS packaged MCP initialization, Chinese metadata, six tools, clean exit');
+    console.log('PASS packaged MCP initialization, Chinese metadata, nine tools, clean exit');
   } else if (mode === '--packaged' && process.platform === 'darwin') {
     assert.equal(process.env.CI, 'true', 'Packaged smoke uses an ephemeral CI user only');
     packagedExecutable = resolve(executable);
@@ -198,7 +198,7 @@ try {
     await waitDesktop();
     await mcp.close();
     await stop(desktop);
-    console.log('PASS stdio → socket → desktop, auth gates, six tools, malformed frame, stale socket and reconnect');
+    console.log('PASS stdio → socket → desktop, auth gates, nine tools, malformed frame, stale socket and reconnect');
   } else if (mode === '--launch' && process.platform === 'darwin') {
     root = await mkdtemp('/private/tmp/sixa-launch-');
     const quote = value => `'${value.replaceAll("'", "'\\''")}'`;

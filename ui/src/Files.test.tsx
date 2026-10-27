@@ -9,7 +9,7 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { call, type OutputFile } from "./api";
 import { Files, FileSaveNotice } from "./Files";
 vi.mock("./api", async (original) => ({
@@ -40,6 +40,25 @@ beforeEach(() => {
   current = { ...item };
   vi.mocked(call).mockImplementation(async (name) => {
     if (name === "get_file_directory") return "C:/结果";
+    if (name === "browse_directory")
+      return {
+        root: "C:/结果",
+        path: "C:/结果",
+        relative: "",
+        total: current.exists ? 1 : 0,
+        items: current.exists
+          ? [
+              {
+                name: current.name,
+                path: current.path,
+                directory: false,
+                size: 20,
+                modified: 1,
+                output: current,
+              },
+            ]
+          : [],
+      };
     if (name === "query_output_files") return { items: [current], total: 1 };
     if (name === "retry_output_file") return current;
     return undefined;
@@ -69,41 +88,23 @@ it("取消选择目录不会改变设置", async () => {
     vi.mocked(call).mock.calls.some(([name]) => name === "set_file_directory"),
   ).toBe(false);
 });
-it("保存失败显示重试，不能打开不存在的文件", async () => {
-  current.error = "处理已完成，保存失败：磁盘空间不足";
+it("被移动文件不在当前真实目录出现", async () => {
   current.exists = false;
   mount();
-  await screen.findByText("保存失败");
-  expect((screen.getByText("打开文件") as HTMLButtonElement).disabled).toBe(
-    true,
-  );
-  fireEvent.click(screen.getByText("重试保存"));
-  expect((await screen.findByRole("alert")).textContent).toContain(
-    "磁盘空间不足",
-  );
-  expect(screen.queryByText("文件已保存")).toBeNull();
+  await screen.findByText("当前文件夹没有符合条件的文件。");
+  expect(screen.queryByText(item.name)).toBeNull();
 });
-it("删除任务后仍可另存实际文件", async () => {
+it("删除任务后仍能打开真实文件", async () => {
   current.task_exists = false;
-  vi.mocked(save).mockResolvedValue("C:/另存.pdf");
   mount();
   await screen.findByText(item.name);
-  expect((screen.getByText("预览") as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(screen.getByText("另存为"));
+  fireEvent.click(screen.getByText("打开文件"));
   await waitFor(() =>
-    expect(call).toHaveBeenCalledWith("copy_output_file", {
-      id: "file",
-      path: "C:/另存.pdf",
+    expect(call).toHaveBeenCalledWith("open_directory_entry", {
+      relative: item.name,
     }),
   );
-});
-it("被移动的文件明确标注且不能打开", async () => {
-  current.exists = false;
-  mount();
-  await screen.findByText("已移动或删除");
-  expect((screen.getByText("所在文件夹") as HTMLButtonElement).disabled).toBe(
-    true,
-  );
+  expect(screen.queryByText("查看任务")).toBeNull();
 });
 it("工作台不能把自动保存失败显示为成功", async () => {
   current.error = "保存失败";

@@ -4,6 +4,110 @@ use std::{fs, path::PathBuf};
 use storage::files::OutputRecord;
 
 impl Engine {
+    pub fn copy_result(
+        &self,
+        record_id: Uuid,
+        directory: &Path,
+        name: &str,
+        mutation_id: Uuid,
+    ) -> Result<OutputRecord> {
+        storage::directory::valid_name(name)?;
+        if let Ok(existing) = self.store.output_record(mutation_id) {
+            return Ok(existing);
+        }
+        let mut record = self.store.output_record(record_id)?;
+        if record.error.is_some() {
+            return Err(Error::Invalid("源结果尚未保存".into()));
+        }
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        std::io::copy(&mut fs::File::open(&record.path)?, &mut temporary)?;
+        temporary.as_file().sync_all()?;
+        let stem = Path::new(name)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let ext = Path::new(name)
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy();
+        if ext.to_lowercase() != record.kind {
+            return Err(Error::Invalid("请保持原文件扩展名".into()));
+        }
+        let mut staging = temporary.into_temp_path();
+        for index in 1..=10_000 {
+            let candidate = if index == 1 {
+                name.to_owned()
+            } else {
+                format!("{stem} ({index}).{ext}")
+            };
+            let path = directory.join(&candidate);
+            match staging.persist_noclobber(&path) {
+                Ok(()) => {
+                    record.id = mutation_id;
+                    record.name = candidate;
+                    record.path = path.to_string_lossy().into_owned();
+                    record.created_at = now();
+                    record.source = "manual".into();
+                    record.size = fs::metadata(path)?.len();
+                    record.exists = true;
+                    self.store.put_output(&record, None)?;
+                    return Ok(record);
+                }
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    staging = error.path;
+                }
+                Err(error) => return Err(Error::Io(error.error.to_string())),
+            }
+        }
+        Err(Error::Invalid("同名文件过多，请更换文件名".into()))
+    }
+    pub fn save_result(
+        &self,
+        id: Uuid,
+        directory: &Path,
+        name: &str,
+        mutation_id: Uuid,
+    ) -> Result<OutputRecord> {
+        storage::directory::valid_name(name)?;
+        if let Ok(existing) = self.store.output_record(mutation_id) {
+            if existing.task_id != id {
+                return Err(Error::Conflict("保存操作标识不匹配".into()));
+            }
+            return Ok(existing);
+        }
+        let (generation, kind, partial, failed_count) = self.output_generation(id)?;
+        if Path::new(name)
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            != kind
+        {
+            return Err(Error::Invalid(format!("文件扩展名必须为 .{kind}")));
+        }
+        let mut record = OutputRecord {
+            id: mutation_id,
+            task_id: id,
+            name: name.into(),
+            kind,
+            path: directory.to_string_lossy().into_owned(),
+            created_at: now(),
+            size: 0,
+            error: None,
+            generation,
+            partial,
+            failed_count,
+            source: "manual".into(),
+            exists: false,
+            task_exists: true,
+        };
+        self.write_output(&mut record, directory);
+        if let Some(error) = &record.error {
+            return Err(Error::Io(error.clone()));
+        }
+        self.store.put_output(&record, None)?;
+        Ok(record)
+    }
     pub fn export_recorded(&self, id: Uuid, path: &Path) -> Result<()> {
         if !path.is_absolute() {
             return Err(Error::Invalid("请选择绝对保存路径".into()));
@@ -252,6 +356,39 @@ mod tests {
         let view = engine.analyze_text("13812345678".into()).unwrap();
         engine.execute(view.meta.id).unwrap();
         view.meta.id
+    }
+    #[test]
+    fn explicit_save_and_copy_are_idempotent_and_never_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = engine(dir.path());
+        let id = complete(&mut e);
+        let folder = dir.path().join("项目");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("结果.txt"), "keep").unwrap();
+        let mutation = Uuid::new_v4();
+        let saved = e.save_result(id, &folder, "结果.txt", mutation).unwrap();
+        assert_eq!(saved.name, "结果 (2).txt");
+        assert_eq!(
+            e.save_result(id, &folder, "结果.txt", mutation)
+                .unwrap()
+                .path,
+            saved.path
+        );
+        assert_eq!(fs::read_to_string(folder.join("结果.txt")).unwrap(), "keep");
+        e.store.delete(id).unwrap();
+        let copy = e
+            .copy_result(saved.id, &folder, "结果.txt", Uuid::new_v4())
+            .unwrap();
+        assert_eq!(copy.name, "结果 (3).txt");
+        assert_eq!(fs::read_to_string(copy.path).unwrap(), "138****5678");
+        let page = e
+            .store
+            .output_page(storage::files::OutputQuery {
+                directory: Some(folder.to_string_lossy().into_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 2);
     }
     #[test]
     fn unique_output_is_durable_idempotent_and_survives_task_deletion() {

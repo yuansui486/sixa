@@ -20,6 +20,20 @@ export interface DocxScrollAnchor {
   page: number;
   fraction?: number;
   offset?: number;
+  progress?: number;
+}
+export function nearestAnchor(id: string, candidates: string[]) {
+  if (candidates.includes(id)) return id;
+  const prefix = id.slice(0, id.lastIndexOf("_") + 1),
+    ordinal = Number(id.slice(prefix.length));
+  if (!Number.isFinite(ordinal)) return undefined;
+  return candidates
+    .filter((key) => key.startsWith(prefix))
+    .sort(
+      (a, b) =>
+        Math.abs(Number(a.slice(prefix.length)) - ordinal) -
+        Math.abs(Number(b.slice(prefix.length)) - ordinal),
+    )[0];
 }
 type Fragment = {
   slot: HTMLElement;

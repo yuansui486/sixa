@@ -30,6 +30,7 @@ pub struct OutputQuery {
     #[serde(default)]
     pub kind: String,
     pub task_id: Option<Uuid>,
+    pub directory: Option<String>,
     #[serde(default)]
     pub offset: u32,
 }
@@ -41,6 +42,25 @@ pub struct OutputPage {
 }
 
 impl Store {
+    pub fn output_state(&self, id: Uuid) -> Result<&'static str> {
+        let mut stmt = self.db.prepare("SELECT json_extract(data,'$.path'), json_extract(data,'$.error') FROM outputs WHERE task_id=?1").map_err(db_err)?;
+        let rows = stmt
+            .query_map([id.to_string()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .map_err(db_err)?;
+        let mut saved = false;
+        for row in rows {
+            let (path, error) = row.map_err(db_err)?;
+            if error.is_none() {
+                saved = true;
+                if Path::new(&path).is_file() {
+                    return Ok("saved");
+                }
+            }
+        }
+        Ok(if saved { "missing" } else { "unsaved" })
+    }
     pub fn output_directory(&self) -> Result<Option<PathBuf>> {
         Ok(self
             .config::<PathBuf>("output_directory")?
@@ -100,21 +120,33 @@ impl Store {
 
     pub fn output_page(&self, query: OutputQuery) -> Result<OutputPage> {
         // instr treats %, _ and user text literally; only the visible page is stat'ed.
-        let filter = "WHERE (?1='' OR instr(lower(json_extract(data,'$.name')),lower(?1))>0) AND (?2='' OR json_extract(data,'$.kind')=?2) AND (?3='' OR task_id=?3)";
+        let filter = "WHERE (?1='' OR instr(lower(json_extract(data,'$.name')),lower(?1))>0) AND (?2='' OR json_extract(data,'$.kind')=?2) AND (?3='' OR task_id=?3) AND (?5='' OR replace(replace(substr(json_extract(data,'$.path'),1,length(json_extract(data,'$.path'))-length(json_extract(data,'$.name'))),char(92),'/'),'//?/','')=?5)";
+        let directory = query
+            .directory
+            .map(|p| {
+                format!(
+                    "{}/",
+                    p.replace('\\', "/")
+                        .trim_start_matches("//?/")
+                        .trim_end_matches('/')
+                )
+            })
+            .unwrap_or_default();
         let task = query.task_id.map(|id| id.to_string()).unwrap_or_default();
         let total: i64 = self
             .db
             .query_row(
                 &format!("SELECT count(*) FROM outputs {filter}"),
-                params![query.search, query.kind, task],
+                params![query.search, query.kind, task, query.offset, directory],
                 |r| r.get(0),
             )
             .map_err(db_err)?;
         let mut stmt = self.db.prepare(&format!("SELECT data, EXISTS(SELECT 1 FROM tasks WHERE tasks.id=outputs.task_id) FROM outputs {filter} ORDER BY json_extract(data,'$.created_at') DESC,id DESC LIMIT 30 OFFSET ?4")).map_err(db_err)?;
         let rows = stmt
-            .query_map(params![query.search, query.kind, task, query.offset], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
-            })
+            .query_map(
+                params![query.search, query.kind, task, query.offset, directory],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
+            )
             .map_err(db_err)?;
         let mut items = Vec::new();
         for row in rows {

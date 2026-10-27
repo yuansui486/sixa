@@ -134,6 +134,15 @@ jobs:
           PLAYWRIGHT_CHANNEL: msedge
         run: npm --prefix ui run test:e2e -- --workers 2
 
+      - name: macOS WebKit 复核与保存流程（离线样本）
+        if: runner.os == 'macOS'
+        working-directory: ui
+        env:
+          SIXA_TEST_WEBKIT: "1"
+        run: |
+          npx playwright install webkit
+          npm run test:e2e -- --project webkit-desktop --workers 2
+
       - name: 构建 Windows 官方更新器验收程序
         if: runner.os == 'Windows'
         env:

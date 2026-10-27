@@ -96,9 +96,11 @@ import {
   resetReview,
 } from "./review";
 import { PageImage } from "./PageImage";
-import { VirtualList } from "./VirtualList";
+import { EntityGroups } from "./EntityGroups";
+import { QuickRedaction } from "./QuickRedaction";
+import { SaveResult, resultName } from "./SaveResult";
 import { clearPreviewCache } from "./preview-cache";
-import { exportName, rememberDirectory, usePreferences } from "./preferences";
+import { usePreferences } from "./preferences";
 import type { DocxScrollAnchor } from "./DocxPreview";
 
 const DocxPreview = lazy(() =>
@@ -481,6 +483,8 @@ function App({
       }>("batch-progress", ({ payload }) => updateActivity(payload, true)),
       listen("files-updated", () => {
         client.invalidateQueries({ queryKey: ["output-files"] });
+        client.invalidateQueries({ queryKey: ["directory"] });
+        client.invalidateQueries({ queryKey: ["tasks"] });
       }),
       listen<TaskMeta>("task-updated", () => {
         client.invalidateQueries({ queryKey: ["output-files"] });
@@ -1472,6 +1476,7 @@ function Workbench() {
     batchId,
     setBatchId,
     pendingTaskId,
+    manualBusy,
   } = useWorkbench();
   const navigate = useNavigate();
   useEffect(
@@ -1510,6 +1515,15 @@ function Workbench() {
   const [pageNumber, setPageNumber] = useState(1);
   const [pageInput, setPageInput] = useState<string | null>(null);
   const [exportedPath, setExportedPath] = useState("");
+  const [savingResult, setSavingResult] = useState(false);
+  const [selectedText, setSelectedText] = useState("");
+  const [selectionToken, setSelectionToken] = useState(0);
+  const [locateSpan, setLocateSpan] = useState<{
+    start: number;
+    end: number;
+    token: number;
+  }>();
+  const [syncScrolling, setSyncScrolling] = useState(true);
   const [showHelpers, setShowHelpers] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [fitPage, setFitPage] = useState(false);
@@ -1536,7 +1550,7 @@ function Workbench() {
     pdf_mode: "safe_rebuild",
   });
   const action = useAction();
-  const working = action.busy || !!pendingTaskId;
+  const working = action.busy || !!pendingTaskId || manualBusy;
   const model = useQuery({
     queryKey: ["model"],
     queryFn: () => call("model_status"),
@@ -1812,7 +1826,7 @@ function Workbench() {
     peer: React.RefObject<HTMLDivElement | null>,
   ) => {
     trackPage(event.currentTarget);
-    if (splitScrollLock.current || !peer.current) return;
+    if (!syncScrolling || splitScrollLock.current || !peer.current) return;
     const source = event.currentTarget;
     const target = peer.current;
     const horizontalRange = source.scrollWidth - source.clientWidth;
@@ -1988,18 +2002,7 @@ function Workbench() {
       }
     });
 
-  const exportFile = () =>
-    action.run(async () => {
-      if (!task) return;
-      const path = await save({
-        defaultPath: exportName(task.meta.display_name, task.extension),
-      });
-      if (path) {
-        await call("export_task", { id: task.meta.id, path });
-        rememberDirectory(path);
-        setExportedPath(path);
-      }
-    });
+  const exportFile = () => setSavingResult(true);
 
   const batchItems =
     batch.data?.items.filter(
@@ -2268,6 +2271,17 @@ function Workbench() {
             imagePages={documentPreview?.pages}
             focusedId={focusedId}
             onFocusEntity={focusEntity}
+            locateSpan={!result ? locateSpan : undefined}
+            onSelectText={
+              !result && reviewing
+                ? (text) => {
+                    setSelectedText(text);
+                    setSelectionToken((n) => n + 1);
+                    setInspectorTab("regions");
+                    setInspectorOpen(true);
+                  }
+                : undefined
+            }
             onOpenImage={(index) => {
               setOfficeView("images");
               setPageNumber(index + 1);
@@ -2285,12 +2299,14 @@ function Workbench() {
             pageRequest={docxPageRequest}
             onPageChange={(page) => setPageNumber(page + 1)}
             scrollAnchor={
-              previewMode === "split" && docxScrollAnchor?.result !== result
+              syncScrolling &&
+              previewMode === "split" &&
+              docxScrollAnchor?.result !== result
                 ? (docxScrollAnchor?.value ?? null)
                 : null
             }
             onScrollAnchor={(anchor) => {
-              if (previewMode === "split")
+              if (syncScrolling && previewMode === "split")
                 setDocxScrollAnchor((current) =>
                   JSON.stringify(current?.value) === JSON.stringify(anchor)
                     ? current
@@ -2398,7 +2414,15 @@ function Workbench() {
             </strong>
             <span>
               <b>{stateLabels[task.meta.state]}</b> · {selectedCount}/
-              {task.entities.length} 个实体
+              {task.entities.length} 处 ·{" "}
+              {
+                new Set(
+                  task.entities.map((e) =>
+                    JSON.stringify([e.text, e.entity_type]),
+                  ),
+                ).size
+              }{" "}
+              项内容
             </span>
           </div>
         </div>
@@ -2420,6 +2444,31 @@ function Workbench() {
           )}
         </span>
         <div className="command-actions">
+          <button
+            className="secondary"
+            disabled={working}
+            onClick={() =>
+              action.run(async () => {
+                await flushReview();
+                setTask(null);
+                setBatchId(null);
+                navigate("/history");
+              })
+            }
+          >
+            返回
+          </button>
+          {previewMode === "split" && (
+            <label className="sync-scroll-toggle">
+              <input
+                type="checkbox"
+                checked={syncScrolling}
+                onChange={(e) => setSyncScrolling(e.target.checked)}
+              />
+              同步滚动
+            </label>
+          )}
+
           <button
             className="secondary"
             disabled={!reviewing || !undo.length || working}
@@ -2485,7 +2534,7 @@ function Workbench() {
           {task.meta.state === "completed" && (
             <button disabled={working} onClick={exportFile}>
               <Download size={16} />
-              保存文件
+              保存并返回
             </button>
           )}
           {["failed", "cancelled"].includes(task.meta.state) && (
@@ -2580,6 +2629,27 @@ function Workbench() {
       )}
       {task.meta.state === "completed" && (
         <FileSaveNotice taskId={task.meta.id} />
+      )}
+      {savingResult && (
+        <SaveResult
+          target={{
+            id: task.meta.id,
+            name: resultName(task.meta.display_name, task.extension),
+          }}
+          onClose={() => setSavingResult(false)}
+          onSaved={(where) => {
+            setSavingResult(false);
+            if (where.external) {
+              setExportedPath(where.path);
+            } else {
+              setTask(null);
+              setBatchId(null);
+              navigate(
+                `/files?dir=${encodeURIComponent(where.relative)}&highlight=${encodeURIComponent(where.path.split(/[\\/]/).pop() || "")}`,
+              );
+            }
+          }}
+        />
       )}
       {exportedPath && (
         <div className="export-notice" role="status">
@@ -3007,7 +3077,7 @@ function Workbench() {
                   className={inspectorTab === "regions" ? "active" : ""}
                   onClick={() => setInspectorTab("regions")}
                 >
-                  手工区域 <b>{manualRegions.length}</b>
+                  手动脱敏 <b>{manualRegions.length}</b>
                 </button>
               </div>
               <button
@@ -3061,84 +3131,14 @@ function Workbench() {
                     取消选择
                   </button>
                 </div>
-                <VirtualList
-                  items={task.entities.filter(
-                    (entity) =>
-                      matchesEntity(entity) || entity.id === focusedId,
-                  )}
+                <EntityGroups
+                  entities={task.entities}
+                  text={task.text}
+                  filter={filter}
                   focusedId={focusedId}
-                  render={(entity) => (
-                    <div
-                      className={`entity-item ${focusedId === entity.id ? "focused" : ""}`}
-                      id={`review-${entity.id}`}
-                      key={entity.id}
-                    >
-                      <input
-                        type="checkbox"
-                        aria-label={`选择${entity.text}`}
-                        checked={entity.selected}
-                        disabled={!reviewing || working}
-                        onChange={(event) =>
-                          change(
-                            task.entities.map((item) =>
-                              item.id === entity.id
-                                ? { ...item, selected: event.target.checked }
-                                : item,
-                            ),
-                          )
-                        }
-                      />
-                      <button
-                        className="entity-copy entity-locate"
-                        onClick={() => focusEntity(entity.id)}
-                      >
-                        <strong>{entity.text}</strong>
-                        <span>
-                          <span className="tag">{entity.type_label}</span>
-                          {Math.round(entity.score * 100)}% · {entity.source}
-                        </span>
-                        <small className="entity-context">
-                          {task.text
-                            .slice(
-                              Math.max(0, entity.display.start - 16),
-                              Math.min(
-                                task.text.length,
-                                entity.display.end + 22,
-                              ),
-                            )
-                            .replace(/\s+/g, " ")}
-                        </small>
-                      </button>
-                      <details className="entity-replacement">
-                        <summary>
-                          {entity.replacement ??
-                            entity.effective_replacement ??
-                            regionsByEntity.get(entity.id)?.[0]?.replacement ??
-                            "默认方式"}
-                        </summary>
-                        <input
-                          aria-label={`${entity.text}的替换文字`}
-                          placeholder={
-                            entity.effective_replacement ?? "使用默认脱敏方式"
-                          }
-                          value={entity.replacement ?? ""}
-                          disabled={!reviewing || working}
-                          onChange={(event) =>
-                            change(
-                              task.entities.map((item) =>
-                                item.id === entity.id
-                                  ? {
-                                      ...item,
-                                      replacement: event.target.value || null,
-                                    }
-                                  : item,
-                              ),
-                            )
-                          }
-                        />
-                      </details>
-                    </div>
-                  )}
+                  editable={!!reviewing && !working}
+                  onFocus={focusEntity}
+                  onChange={change}
                 />
                 {filter &&
                   focusedId &&
@@ -3205,6 +3205,30 @@ function Workbench() {
               </div>
             ) : (
               <div className="inspector-body" role="tabpanel">
+                <QuickRedaction
+                  id={task.meta.id}
+                  revision={task.revision}
+                  editable={!!reviewing && !working}
+                  selectedText={selectedText}
+                  selectionToken={selectionToken}
+                  onLocate={(span, page) => {
+                    setPreviewMode("source");
+                    if (page != null) {
+                      setOfficeView("images");
+                      setPageNumber(page + 1);
+                      requestAnimationFrame(() =>
+                        requestAnimationFrame(() =>
+                          canvasRef.current
+                            ?.querySelector(`[data-page="${page}"]`)
+                            ?.scrollIntoView({ block: "start" }),
+                        ),
+                      );
+                    } else {
+                      setOfficeView("body");
+                      setLocateSpan({ ...span, token: Date.now() });
+                    }
+                  }}
+                />
                 {helperRegion && (
                   <div className="helper-detail">
                     <strong>识别文字</strong>
@@ -3281,7 +3305,7 @@ function Workbench() {
                   ))}
                   {!manualRegions.length && (
                     <p className="empty">
-                      还没有手工区域，可直接在页面上拖动框选。
+                      尚未添加区域。图片/PDF 可使用框选，文字可在上方查找替换。
                     </p>
                   )}
                 </div>

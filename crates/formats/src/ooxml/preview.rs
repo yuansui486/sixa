@@ -421,20 +421,39 @@ impl Office {
         revision: u64,
         include_docx: bool,
     ) -> Result<Presentation> {
+        if self.anchor_version == 0 {
+            return Office::read(original, extension)?.presentation(
+                original,
+                extension,
+                revision,
+                include_docx,
+            );
+        }
         let mut utf16 = 0usize;
         let mut previous = 0usize;
+        let mut part_positions = HashMap::<String, usize>::new();
         let anchors = self
             .pieces
             .iter()
-            .enumerate()
-            .map(|(index, piece)| {
+            .map(|piece| {
                 utf16 += self.text[previous..piece.span.start].encode_utf16().count();
                 let text = &self.text[piece.span.start..piece.span.end];
                 let start = utf16;
                 utf16 += text.encode_utf16().count();
                 previous = piece.span.end;
+                let position = part_positions.entry(piece.part.clone()).or_default();
+                let part_id = format!(
+                    "{:016x}",
+                    piece
+                        .part
+                        .bytes()
+                        .fold(0xcbf29ce484222325u64, |hash, byte| (hash ^ byte as u64)
+                            .wrapping_mul(0x100000001b3))
+                );
+                let anchor_id = format!("sixa_text_{part_id}_{}", *position);
+                *position += 1;
                 OfficeAnchor {
-                    id: format!("sixa_text_{index}"),
+                    id: anchor_id,
                     text: text.into(),
                     display: Span { start, end: utf16 },
                     label: label(&piece.part),

@@ -1,5 +1,6 @@
 pub mod batch;
 pub mod files;
+pub mod manual;
 use domain::{
     Entity, EntityDto, Error, ErrorInfo, OcrProfile, PageDto, Point, Policy, PreviewDto, RegionDto,
     RegionSource, Result, Rule, Selection, TaskMeta, TaskOptions, TaskState,

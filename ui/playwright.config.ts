@@ -15,6 +15,15 @@ export default defineConfig({
     reuseExistingServer: false,
   },
   projects: [
+    ...(process.env.SIXA_TEST_WEBKIT
+      ? [
+          {
+            name: "webkit-desktop",
+            grep: /@workflow/,
+            use: { browserName: "webkit" as const, channel: undefined },
+          },
+        ]
+      : []),
     { name: "desktop", use: { browserName: "chromium" } },
     {
       name: "compact-desktop",
