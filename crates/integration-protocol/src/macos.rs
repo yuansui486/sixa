@@ -122,11 +122,23 @@ impl StartupGuard {
 }
 
 pub fn startup_needs_attention(path: &Path) -> io::Result<bool> {
-    match try_lock(path, "startup.lock") {
-        Ok(lock) => Ok(lock.0.metadata()?.len() != 0),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
-        Err(error) => Err(error),
+    let parent = directory(path, true)?;
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(parent.join("startup.lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != uid() || metadata.mode() & 0o777 != 0o600 {
+        return Err(denied());
     }
+    // Readers never take the writer lock: two simultaneous MCP status checks
+    // must not mistake each other's momentary inspection for a blocked startup.
+    Ok(metadata.len() != 0)
 }
 
 pub struct Server {
@@ -283,6 +295,14 @@ mod tests {
         drop(startup); // Failed setup, cancellation, or process exit.
         assert!(startup_needs_attention(&path).unwrap());
         StartupGuard::begin(&path).unwrap().ready().unwrap();
+        assert!(!startup_needs_attention(&path).unwrap());
+    }
+
+    #[test]
+    fn inspecting_an_empty_startup_marker_does_not_block_other_readers() {
+        let (_root, path) = fixture();
+        let _lock = try_lock(&path, "startup.lock").unwrap();
+        assert!(!startup_needs_attention(&path).unwrap());
         assert!(!startup_needs_attention(&path).unwrap());
     }
 
