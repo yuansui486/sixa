@@ -59,7 +59,13 @@ function Assert-Tools($Process) {
     $read = $Process.StandardOutput.ReadLineAsync()
     Assert-True ($read.Wait(5000)) 'MCP tools/list timed out'
     $response = $read.Result | ConvertFrom-Json
-    Assert-True ($response.result.tools.Count -eq 6) 'Installed MCP tool list is incomplete'
+    $expected = @('desensitization_status', 'desensitize_file', 'desensitize_batch',
+        'get_desensitization_job', 'wait_desensitization_job', 'cancel_desensitization_job',
+        'list_desensitized_files', 'browse_output_directory', 'create_output_directory')
+    Assert-True ($response.result.tools.Count -eq $expected.Count) 'Installed MCP tool list is incomplete'
+    foreach ($name in $expected) {
+        Assert-True ($response.result.tools.name -contains $name) "Installed MCP is missing $name"
+    }
 }
 function Copy-Mcp([string]$Directory) {
     New-Item -ItemType Directory -Path $Directory -Force | Out-Null

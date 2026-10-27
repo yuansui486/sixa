@@ -178,11 +178,16 @@ try {
       ['desensitize_file', { source_path: join(root, '中文 空格.pdf') }, 'AUTH_REQUIRED'],
       ['desensitize_batch', { source_paths: [join(root, 'one.pdf')] }, 'AUTH_REQUIRED'],
       ['desensitize_file', { source_path: 'relative.pdf' }, 'INVALID_PATH'],
-      ...toolNames.slice(3).map(name => [name, { job_id: '11111111-1111-4111-8111-111111111111' }, 'JOB_NOT_FOUND']),
+      ...['get_desensitization_job', 'wait_desensitization_job', 'cancel_desensitization_job']
+        .map(name => [name, { job_id: '11111111-1111-4111-8111-111111111111' }, 'JOB_NOT_FOUND']),
+      ['list_desensitized_files', {}, 'AUTH_REQUIRED'],
+      ['list_desensitized_files', { history: true }, 'AUTH_REQUIRED'],
+      ['browse_output_directory', {}, 'AUTH_REQUIRED'],
+      ['create_output_directory', { name: 'offline-folder' }, 'AUTH_REQUIRED'],
     ]) {
       const result = await mcp.call(name, args);
       assert.equal(result.isError, true);
-      assert.equal(result.structuredContent.code, expected);
+      assert.equal(result.structuredContent.code, expected, `${name}: unexpected error contract`);
       assert.ok(result.structuredContent.recovery_action);
     }
     // A hostile oversized frame must not terminate the listener or allocate a large body.
