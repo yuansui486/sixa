@@ -125,6 +125,7 @@ impl Response {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     AppNotRunning,
+    StartupBlocked,
     AppUpdating,
     AuthRequired,
     AuthExpired,

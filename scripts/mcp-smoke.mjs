@@ -172,7 +172,7 @@ try {
   } else if (mode === '--launch' && process.platform === 'darwin') {
     root = await mkdtemp('/private/tmp/sixa-launch-');
     const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
-    for (const behavior of ['ready', 'hang']) {
+    for (const behavior of ['ready', 'hang', 'blocked']) {
       const directory = join(root, behavior);
       const app = join(directory, '私匣 测试.app');
       const macos = join(app, 'Contents', 'MacOS');
@@ -181,6 +181,9 @@ try {
       launchedHosts.push(starts);
       await mkdir(macos, { recursive: true });
       await mkdir(ipc, { mode: 0o700 });
+      if (behavior === 'blocked') {
+        await writeFile(join(ipc, 'startup.lock'), 'pending', { mode: 0o600 });
+      }
       const bundledMcp = join(macos, 'sixa-mcp');
       await copyFile(executable, bundledMcp);
       await chmod(bundledMcp, 0o755);
@@ -196,7 +199,18 @@ try {
       const env = { ...process.env, SIXA_MCP_TEST_DIRECTORY: ipc };
       const mcp = await client(bundledMcp, env);
       await assert.rejects(readFile(starts), { code: 'ENOENT' }, 'initialize must not open the desktop');
-      if (behavior === 'ready') {
+      if (behavior === 'blocked') {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          // Independent client processes must respect the persisted failure gate.
+          const probe = await client(bundledMcp, env);
+          const result = await probe.call('desensitization_status');
+          assert.equal(result.structuredContent.code, 'STARTUP_BLOCKED');
+          assert.equal(result.structuredContent.retryable, false);
+          assert.match(result.structuredContent.recovery_action, /手动打开/);
+          await probe.close();
+        }
+        await assert.rejects(readFile(starts), { code: 'ENOENT' }, 'blocked startup must never relaunch or prompt');
+      } else if (behavior === 'ready') {
         const second = await client(bundledMcp, env);
         const statuses = await Promise.all([mcp.call('desensitization_status'), second.call('desensitization_status')]);
         for (const result of statuses) {
@@ -221,7 +235,7 @@ try {
       }
       await mcp.close();
     }
-    console.log('PASS LaunchServices auto-start, Chinese/space bundle path, concurrent calls, unauthenticated guidance, startup timeout and cooldown');
+    console.log('PASS LaunchServices auto-start, Chinese/space bundle path, concurrent calls, unauthenticated guidance, startup timeout, cooldown and persistent failure gate');
   } else {
     throw new Error('Usage: --metadata <mcp> | --desktop <debug-desktop> <debug-mcp> | --launch <debug-mcp> (macOS)');
   }

@@ -100,6 +100,35 @@ impl Drop for Lock {
     }
 }
 
+/// Persist a failed/incomplete desktop startup across MCP client restarts.
+/// Only a new desktop startup may clear this gate after it becomes ready.
+/// No credential or document content is stored in the marker.
+pub struct StartupGuard(Lock);
+
+impl StartupGuard {
+    pub fn begin(path: &Path) -> io::Result<Self> {
+        let mut lock = try_lock(path, "startup.lock")?;
+        lock.0.rewind()?;
+        lock.0.set_len(0)?;
+        lock.0.write_all(b"pending")?;
+        lock.0.sync_all()?;
+        Ok(Self(lock))
+    }
+
+    pub fn ready(self) -> io::Result<()> {
+        self.0.0.set_len(0)?;
+        self.0.0.sync_all()
+    }
+}
+
+pub fn startup_needs_attention(path: &Path) -> io::Result<bool> {
+    match try_lock(path, "startup.lock") {
+        Ok(lock) => Ok(lock.0.metadata()?.len() != 0),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 pub struct Server {
     pub listener: UnixListener,
     path: PathBuf,
@@ -243,6 +272,30 @@ mod tests {
         drop(first);
         let mut second = try_lock(&path, "launch.lock").unwrap();
         assert!(!second.begin_launch(cooldown).unwrap());
+    }
+
+    #[test]
+    fn incomplete_startup_blocks_relaunch_until_desktop_recovers() {
+        let (_root, path) = fixture();
+        assert!(!startup_needs_attention(&path).unwrap());
+        let startup = StartupGuard::begin(&path).unwrap();
+        assert!(startup_needs_attention(&path).unwrap());
+        drop(startup); // Failed setup, cancellation, or process exit.
+        assert!(startup_needs_attention(&path).unwrap());
+        StartupGuard::begin(&path).unwrap().ready().unwrap();
+        assert!(!startup_needs_attention(&path).unwrap());
+    }
+
+    #[test]
+    fn startup_gate_rejects_symlinks_without_changing_target() {
+        let (root, path) = fixture();
+        directory(&path, true).unwrap();
+        let target = root.path().join("keep");
+        fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, path.parent().unwrap().join("startup.lock")).unwrap();
+        assert!(StartupGuard::begin(&path).is_err());
+        assert!(startup_needs_attention(&path).is_err());
+        assert_eq!(fs::read(target).unwrap(), b"keep");
     }
 
     #[tokio::test]

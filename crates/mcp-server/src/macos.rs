@@ -1,5 +1,5 @@
 use crate::{ErrorCode, IntegrationError, transport_error};
-use integration_protocol::macos::{connect, try_lock};
+use integration_protocol::macos::{connect, startup_needs_attention, try_lock};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -53,6 +53,11 @@ pub async fn connect_or_launch(path: &Path) -> Result<UnixStream, IntegrationErr
                 Err(error) => return Err(transport_error(error)),
             }
             if launch_lock.is_none() {
+                if startup_needs_attention(path).map_err(transport_error)? {
+                    return Err(IntegrationError::new(ErrorCode::StartupBlocked,
+                        "私匣上次启动未完成，可能正在等待系统钥匙串授权。为避免反复弹窗，已停止自动启动。请手动打开私匣并处理系统提示，应用就绪后再检查 MCP 状态；不要自动循环重试或删除钥匙串密钥"
+                    ));
+                }
                 match try_lock(path, "launch.lock") {
                     Ok(mut lock) => {
                         if last.is_some_and(|time| time.elapsed() < RETRY_COOLDOWN)

@@ -754,6 +754,7 @@ fn cancel_job_output(result: CancelJobResult) -> CancelJobOutput {
 fn error_code_name(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::AppNotRunning => "APP_NOT_RUNNING",
+        ErrorCode::StartupBlocked => "STARTUP_BLOCKED",
         ErrorCode::AppUpdating => "APP_UPDATING",
         ErrorCode::AuthRequired => "AUTH_REQUIRED",
         ErrorCode::AuthExpired => "AUTH_EXPIRED",
@@ -773,6 +774,12 @@ fn retry_status_action(message: &str) -> NextAction {
 
 fn error_output(error: IntegrationError, context: CallContext) -> ErrorOutput {
     let (retryable, outcome_unknown, recovery_action, suggested_tool) = match error.code {
+        ErrorCode::StartupBlocked => (
+            false,
+            false,
+            "请用户手动打开私匣并处理钥匙串或其他启动提示；应用就绪后再检查状态。不要循环重试、重启应用或删除密钥",
+            None,
+        ),
         ErrorCode::AppUpdating => (
             true,
             false,
@@ -1321,6 +1328,7 @@ mod tests {
     #[test]
     fn every_error_code_has_a_safe_recovery_contract() {
         let expectations = [
+            (ErrorCode::StartupBlocked, false, false),
             (ErrorCode::AppNotRunning, true, true),
             (ErrorCode::AppUpdating, true, true),
             (ErrorCode::AuthRequired, true, true),

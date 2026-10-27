@@ -1208,6 +1208,14 @@ fn main() {
             let root = desktop_test_root
                 .clone()
                 .unwrap_or(app.path().local_data_dir()?.join("LocalDesensitization"));
+            #[cfg(target_os = "macos")]
+            let startup = if test_mode {
+                None
+            } else {
+                Some(integration_protocol::macos::StartupGuard::begin(
+                    &integration_protocol::macos::endpoint(),
+                )?)
+            };
             let key = if test_mode {
                 Zeroizing::new([197; 32])
             } else {
@@ -1280,6 +1288,10 @@ fn main() {
             if !test_mode {
                 integration::start(app.handle().clone())?;
                 updates::start(app.handle().clone());
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(startup) = startup {
+                startup.ready()?;
             }
             #[cfg(all(debug_assertions, target_os = "macos"))]
             if test_mode && std::env::var_os("SIXA_MCP_TEST_DIRECTORY").is_some() {
