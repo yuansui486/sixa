@@ -44,7 +44,7 @@ jobs:
               target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
               target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
           - name: macOS Intel (DMG)
-            os: macos-14
+            os: macos-15
             target: x86_64-apple-darwin
             bundle: app,dmg
             artifact: sixa-macos-x64
@@ -53,7 +53,7 @@ jobs:
               target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
               target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
           - name: macOS Apple Silicon (DMG)
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             bundle: app,dmg
             artifact: sixa-macos-arm64
