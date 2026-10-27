@@ -176,9 +176,7 @@ impl PpOcr {
         verified.require(crate::models::OCR_MODEL_FILES)?;
         let dir = verified.directory();
         progress("runtime");
-        ort::init_from(crate::models::runtime_library_path(dir))
-            .map_err(model_error)?
-            .commit();
+        crate::runtime::initialize(&crate::models::runtime_library_path(dir))?;
         let mut load = |name: &'static str| {
             progress(name);
             Session::builder()

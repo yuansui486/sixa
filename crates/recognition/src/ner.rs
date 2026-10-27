@@ -107,9 +107,7 @@ impl Raner {
         verified.require(crate::models::RANER_MODEL_FILES)?;
         let dir = verified.directory();
         progress("runtime");
-        ort::init_from(crate::models::runtime_library_path(dir))
-            .map_err(err)?
-            .commit();
+        crate::runtime::initialize(&crate::models::runtime_library_path(dir))?;
         progress("session");
         let session = Session::builder()
             .map_err(err)?

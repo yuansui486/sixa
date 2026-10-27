@@ -168,14 +168,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::args_os()
             .nth(1)
             .ok_or("runtime library path required")?,
-    )
-    .canonicalize()?;
+    );
     let start = Instant::now();
     eprintln!(
         "runtime_probe: loading runtime arch={}",
         std::env::consts::ARCH
     );
-    ort::init_from(&library)?.commit();
+    if std::env::args().nth(2).as_deref() == Some("--retry-after-invalid") {
+        let invalid = tempfile::tempdir()?;
+        assert!(recognition::runtime::initialize(&invalid.path().join("missing")).is_err());
+        let corrupt = invalid.path().join("corrupt-runtime");
+        std::fs::write(&corrupt, b"not a dynamic library")?;
+        assert!(recognition::runtime::initialize(&corrupt).is_err());
+    }
+    recognition::runtime::initialize(&library)?;
     let directory = tempfile::tempdir()?;
     let root = directory.path();
     std::fs::write(root.join("emissions.onnx"), model())?;

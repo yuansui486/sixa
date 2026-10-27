@@ -1180,6 +1180,29 @@ async fn load_models(state: Shared<'_>, app: tauri::AppHandle) -> Result<Runtime
     Ok(state.model.lock().map_err(poisoned)?.clone())
 }
 fn main() {
+    // Read-only diagnostic for the exact signed desktop executable, before GUI,
+    // profile, authentication or model access. No alternate library path input.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--check-inference-runtime")
+    {
+        #[cfg(target_os = "macos")]
+        {
+            let path = recognition::models::runtime_library_path(std::path::Path::new("."));
+            match recognition::runtime::initialize(&path) {
+                Ok(()) => {
+                    println!("SIXA_RUNTIME_READY {}", std::env::consts::ARCH);
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        std::process::exit(2);
+    }
     let mut context = tauri::generate_context!();
     // Debug-only native UI tests use a separate instance, profile and data root.
     // Release builds never read this environment variable.

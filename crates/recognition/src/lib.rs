@@ -1,6 +1,7 @@
 pub mod models;
 pub mod ner;
 pub mod ocr;
+pub mod runtime;
 use domain::{Entity, Error, Result, Rule, RuleKind, Span};
 use presidio_analyzer::RecognizerResult;
 use regex::{Regex, RegexBuilder};
