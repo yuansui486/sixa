@@ -4,7 +4,7 @@
 
 支持 TXT/Markdown、PNG/JPEG/BMP/多页 TIFF、DOCX、XLSX/XLSM 和 PDF。工作台提供实体与区域复核、手工框选、结果预览、脱敏导出和加密恢复；还支持批量、历史、识别规则、脱敏方式和模型管理。PDF 提供安全重建与 MuPDF 保真模式；Office 保留 XLSM 的 VBA 原字节并报告移除的失效签名。
 
-私匣使用 Smart Ops 租户用户登录，租户需单独开通“本地数据脱敏”模块。设备会话每 10 分钟在线校验一次，网络中断后可继续使用最近一次签发的 24 小时离线租约。账号、租户和设备授权通过 HTTPS 校验；待处理文件、识别内容、任务历史和规则不会发送到认证服务器。会话令牌保存在 Windows Credential Manager 或 macOS Keychain，不进入 WebView 或浏览器存储。
+私匣使用 Smart Ops 租户用户登录，租户需单独开通“本地数据脱敏”模块。设备会话每 10 分钟在线校验一次，网络中断后可继续使用最近一次签发的 24 小时离线租约。账号、租户和设备授权通过 HTTPS 校验；待处理文件、识别内容、任务历史和规则不会发送到认证服务器。会话令牌加密保存在本机，不进入 WebView 或浏览器存储。内部密钥在 Windows 使用 Credential Manager，在 Mac 使用当前用户私有文件；Mac 的保护范围和旧版迁移见[本机密钥说明](docs/macos-local-key.md)。
 
 Windows 和 macOS 安装包均附带 MCP stdio 服务，供本机 AI 工具异步创建、查询、等待和取消脱敏任务。桌面应用需已登录；Windows 通过当前用户专属命名管道通信，macOS 通过当前用户的本地 socket 通信，并支持按需启动桌面应用。不开放 HTTP 端口，也不修改 `PATH`。外部调用使用桌面中现有规则和脱敏方式，只返回任务状态、计数及输出路径，不返回正文或实体值。配置和工具说明见 [AI 工具接入](docs/ai-mcp-integration.md)。
 

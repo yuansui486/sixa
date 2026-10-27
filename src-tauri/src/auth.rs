@@ -134,6 +134,18 @@ fn new_auth_state() -> StoredAuthState {
 }
 
 fn read_legacy_auth_state() -> Option<StoredAuthState> {
+    // Optional old login/device credentials must not trigger additional Keychain
+    // dialogs after the master-key migration. Unavailable credentials require login.
+    // Runs synchronously during setup, before any workers/heartbeat are started.
+    #[cfg(target_os = "macos")]
+    let _interaction = {
+        use security_framework::os::macos::keychain::SecKeychain;
+        if SecKeychain::user_interaction_allowed().ok()? {
+            Some(SecKeychain::disable_user_interaction().ok()?)
+        } else {
+            None
+        }
+    };
     let session = match keyring::Entry::new(LEGACY_CREDENTIAL_SERVICE, LEGACY_SESSION_CREDENTIAL)
         .ok()?
         .get_secret()

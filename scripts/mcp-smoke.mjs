@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, rm, writeFile, copyFile, readFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, copyFile, readFile, chmod, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { createConnection } from 'node:net';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -118,7 +119,36 @@ try {
     const reconnect = await client(sidecar);
     assert.equal((await reconnect.call('desensitization_status')).isError ?? false, false);
     await reconnect.close();
-    console.log('PASS final signed app: auto-launch, stdio → socket → desktop, login guidance and reconnect; no model downloads');
+    const secrets = join(homedir(), 'Library/Application Support/LocalDesensitization/secrets');
+    const keyPath = join(secrets, 'internal-key-v1');
+    const key = await readFile(keyPath);
+    assert.equal(key.length, 32);
+    assert.equal((await stat(secrets)).mode & 0o777, 0o700);
+    assert.equal((await stat(keyPath)).mode & 0o777, 0o600);
+    assert.equal((await stat(keyPath)).uid, process.getuid());
+    // Restart the final installed app with Keychain locked. Local keys and the
+    // encrypted login state must suffice; no system authorization is allowed.
+    execFileSync('/usr/bin/security', ['lock-keychain']);
+    const listing = execFileSync('/bin/ps', ['-axo', 'pid=,comm='], { encoding: 'utf8' });
+    for (const line of listing.split('\n')) {
+      const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+      if (match && match[2].trim() === packagedExecutable) process.kill(Number(match[1]), 'SIGKILL');
+    }
+    await delay(500);
+    execFileSync('/usr/bin/open', ['-a', resolve(packagedExecutable, '../../..')]);
+    const restarted = await client(sidecar);
+    const deadline = Date.now() + 20000;
+    let ready = false;
+    while (Date.now() < deadline) {
+      const result = await restarted.call('desensitization_status');
+      if (!result.isError) { ready = true; break; }
+      await delay(200);
+    }
+    assert.ok(ready, 'installed app must restart even with Keychain locked');
+    assert.deepEqual(await readFile(keyPath), key, 'restart must preserve the master key');
+    key.fill(0);
+    await restarted.close();
+    console.log('PASS final signed app: auto-launch, desktop communication, login guidance, reconnect, private key permissions and restart with locked Keychain; no model downloads');
   } else if (mode === '--desktop' && process.platform === 'darwin') {
     root = await mkdtemp('/private/tmp/sixa-mcp-');
     const env = { ...process.env, SIXA_DESKTOP_TEST_ROOT: join(root, 'profile'),

@@ -1199,7 +1199,9 @@ fn main() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            lifecycle::restore(app);
+            if app.try_state::<lifecycle::Lifecycle>().is_some() {
+                lifecycle::restore(app);
+            }
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1219,7 +1221,27 @@ fn main() {
             let key = if test_mode {
                 Zeroizing::new([197; 32])
             } else {
-                storage::credential_key()?
+                match storage::credential_key(&root) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        #[cfg(target_os = "macos")]
+                        {
+                            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                            let handle = app.handle().clone();
+                            app.dialog()
+                                .message(format!("{error}\n\n历史文件与模型均已保留。关闭后请按提示处理，再手动打开私匣。"))
+                                .title("私匣暂时无法读取加密密钥")
+                                .buttons(MessageDialogButtons::OkCustom("退出私匣".into()))
+                                .show(move |_| handle.exit(1));
+                            return Ok(());
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        return Err(error.into());
+                    }
+                }
             };
             let store = storage::Store::open(&root, key.clone())?;
             integration_protocol::updating::finish_startup(&root, env!("CARGO_PKG_VERSION"));
@@ -1435,19 +1457,19 @@ fn main() {
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 ..
             } if label == "main" => {
-                if !app.state::<lifecycle::Lifecycle>().exiting() {
+                if app.try_state::<lifecycle::Lifecycle>().is_some_and(|state| !state.exiting()) {
                     api.prevent_close();
                     lifecycle::request_close(app, false);
                 }
             }
             tauri::RunEvent::ExitRequested { api, .. }
-                if !app.state::<lifecycle::Lifecycle>().exiting() =>
+                if app.try_state::<lifecycle::Lifecycle>().is_some_and(|state| !state.exiting()) =>
             {
                 api.prevent_exit();
                 lifecycle::request_close(app, true);
             }
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => lifecycle::restore(app),
+            tauri::RunEvent::Reopen { .. } if app.try_state::<lifecycle::Lifecycle>().is_some() => lifecycle::restore(app),
             _ => {}
         });
 }

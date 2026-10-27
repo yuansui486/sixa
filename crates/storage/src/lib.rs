@@ -1,4 +1,6 @@
 pub mod files;
+#[cfg(target_os = "macos")]
+mod local_key;
 pub mod vault;
 use domain::{AppSettings, Error, ErrorInfo, Policy, Result, Rule, TaskMeta};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -514,7 +516,22 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     tmp.persist(path).map_err(|e| Error::Io(e.to_string()))?;
     Ok(())
 }
-pub fn credential_key() -> Result<Zeroizing<[u8; 32]>> {
+#[cfg(target_os = "macos")]
+pub fn credential_key(root: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    local_key::load_or_migrate(root, || {
+        let entry = keyring::Entry::new("LocalDesensitization", "internal-key-v1")
+            .map_err(|e| Error::Io(e.to_string()))?;
+        match entry.get_secret() {
+            Ok(bytes) => Ok(Zeroizing::new(bytes)),
+            Err(_) => Err(Error::State(
+                "无法读取旧版加密密钥，尚未迁移。请解锁 Mac 的“登录”钥匙串，重新打开私匣，并在系统提示中输入 Mac 登录密码后点击“允许”。请勿删除 LocalDesensitization 密钥或清空应用数据。".into(),
+            )),
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn credential_key(_root: &Path) -> Result<Zeroizing<[u8; 32]>> {
     use rand::RngCore;
     let entry = keyring::Entry::new("LocalDesensitization", "internal-key-v1")
         .map_err(|e| Error::Io(e.to_string()))?;

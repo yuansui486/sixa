@@ -123,6 +123,11 @@ jobs:
         if: runner.os == 'Windows'
         run: npm --prefix ui test
 
+      - name: 验证 macOS 钥匙串迁移与本机密钥（临时测试凭据）
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: cargo test --locked -p storage --target ${{ matrix.target }} local_key::tests::native_keychain_migration -- --ignored
+
       - name: 桌面界面流程回归
         if: runner.os == 'Windows'
         env:
