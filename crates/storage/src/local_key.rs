@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 
 const KEY_FILE: &str = "internal-key-v1";
 const MARKER: &str = "db/local-key-v1";
+const KEY_CHECK: &[u8] = b"sixa-local-key-v1";
 
 fn unsafe_permissions() -> Error {
     Error::State(
@@ -82,11 +83,31 @@ fn decode(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     ))
 }
 
-fn record_local_key(root: &Path) -> Result<()> {
+fn record_local_key(root: &Path, key: &[u8; 32]) -> Result<()> {
     fs::create_dir_all(root.join("db"))?;
     // Separate from secrets so removal of that directory cannot silently reset a profile.
-    if !exists(&root.join(MARKER))? {
-        crate::atomic_write(&root.join(MARKER), b"local-key-v1\n")?;
+    let path = root.join(MARKER);
+    if exists(&path)? {
+        let mut encrypted = Vec::new();
+        File::open(path)?.take(128).read_to_end(&mut encrypted)?;
+        if !crate::vault::open(key, &encrypted, KEY_CHECK).is_ok_and(|plain| plain == KEY_CHECK) {
+            return Err(Error::State("本机密钥校验失败，已停止启动。请恢复密钥及校验文件的匹配备份，不要删除或重置现有数据。".into()));
+        }
+    } else {
+        crate::atomic_write(&path, &crate::vault::seal(key, KEY_CHECK, KEY_CHECK)?)?;
+    }
+    Ok(())
+}
+
+fn validate_existing_auth(root: &Path, key: &[u8; 32]) -> Result<()> {
+    let auth = root.join("db/auth-state.enc");
+    if exists(&auth)? {
+        let encrypted = fs::read(auth)?;
+        let _plain = Zeroizing::new(
+            crate::vault::open(key, &encrypted, b"sixa-auth-state-v1").map_err(|_| {
+                Error::State("密钥无法解密现有登录数据，已停止启动，原文件未修改。".into())
+            })?,
+        );
     }
     Ok(())
 }
@@ -124,7 +145,8 @@ pub(super) fn load_or_migrate(
             .take(33)
             .read_to_end(&mut bytes)?;
         let key = decode(&bytes)?;
-        record_local_key(root)?;
+        validate_existing_auth(root, &key)?;
+        record_local_key(root, &key)?;
         return Ok(key);
     }
     if exists(&root.join(MARKER))? {
@@ -133,15 +155,7 @@ pub(super) fn load_or_migrate(
     let key = if legacy_profile(root)? {
         let key = decode(&legacy()?)?;
         // Verify migration against existing encrypted login state when available.
-        let auth = root.join("db/auth-state.enc");
-        if exists(&auth)? {
-            let encrypted = fs::read(auth)?;
-            let _plain = Zeroizing::new(
-                crate::vault::open(&key, &encrypted, b"sixa-auth-state-v1").map_err(|_| {
-                    Error::State("旧密钥无法解密现有登录数据，迁移已停止，原文件未修改。".into())
-                })?,
-            );
-        }
+        validate_existing_auth(root, &key)?;
         key
     } else {
         let mut key = Zeroizing::new([0u8; 32]);
@@ -155,7 +169,7 @@ pub(super) fn load_or_migrate(
         .persist_noclobber(&path)
         .map_err(|e| Error::Io(e.to_string()))?;
     directory.sync_all()?;
-    record_local_key(root)?;
+    record_local_key(root, &key)?;
     Ok(key)
 }
 
@@ -249,6 +263,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         load_or_migrate(root.path(), no_keychain).unwrap();
         let path = root.path().join("secrets/internal-key-v1");
+        fs::write(&path, [99; 32]).unwrap();
+        assert!(load_or_migrate(root.path(), no_keychain).is_err());
+        assert_eq!(fs::read(&path).unwrap(), [99; 32]);
         fs::write(&path, b"broken").unwrap();
         assert!(load_or_migrate(root.path(), no_keychain).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"broken");
