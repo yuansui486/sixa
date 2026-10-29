@@ -8,12 +8,24 @@ pub struct TextMatch {
     pub display: Span,
     pub context: String,
     pub conflicts: usize,
+    pub conflict_details: Vec<TextConflict>,
     pub locatable: bool,
     pub page: Option<u32>,
+    pub polygon: Option<Vec<domain::Point>>,
+}
+#[derive(Serialize)]
+pub struct TextConflict {
+    pub entity_type: String,
+    pub type_label: String,
+    pub replacement: String,
+    pub context: String,
+    pub page: Option<u32>,
+    pub polygon: Option<Vec<domain::Point>>,
 }
 #[derive(Serialize)]
 pub struct TextMatches {
     pub revision: u64,
+    pub total: usize,
     pub items: Vec<TextMatch>,
 }
 #[derive(Serialize, Deserialize)]
@@ -89,49 +101,101 @@ fn spans(p: &Payload, query: &str) -> Result<Vec<Span>> {
     }
     Ok(values)
 }
+fn context(text: &str, span: Span) -> String {
+    format!(
+        "{}{}{}",
+        text[..span.start]
+            .chars()
+            .rev()
+            .take(16)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<String>(),
+        &text[span.start..span.end],
+        text[span.end..].chars().take(22).collect::<String>()
+    )
+}
 impl Engine {
-    pub fn find_text(&self, id: Uuid, query: &str) -> Result<TextMatches> {
+    pub fn find_text(
+        &self,
+        id: Uuid,
+        query: &str,
+        preview_page: Option<u32>,
+    ) -> Result<TextMatches> {
         let p = self.task_payload(id)?;
         let text = payload_text(&p);
         let maps = line_maps(&p)?;
-        let items = spans(&p, query)?
+        let all_spans = spans(&p, query)?;
+        let total = all_spans.len();
+        let items = all_spans
             .into_iter()
             .map(|span| {
-                let context = format!(
-                    "{}{}{}",
-                    text[..span.start]
-                        .chars()
-                        .rev()
-                        .take(16)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<String>(),
-                    &text[span.start..span.end],
-                    text[span.end..].chars().take(22).collect::<String>()
-                );
+                let line = maps
+                    .iter()
+                    .find(|(line, _)| span.start >= line.start && span.end <= line.end);
+                let polygon = line
+                    .filter(|(_, region)| preview_page == Some(region.page))
+                    .map(|(line_span, region)| {
+                        let marker = Entity {
+                            id: Uuid::nil(),
+                            entity_type: "手动文字".into(),
+                            score: 1.0,
+                            source: "手动添加".into(),
+                            selected: true,
+                            span,
+                            replacement: None,
+                        };
+                        entity_polygon(
+                            &text[line_span.start..line_span.end],
+                            line_span.start,
+                            &marker,
+                            &region.polygon,
+                        )
+                    });
+                let mut conflict_count = 0;
+                let mut conflicts = Vec::new();
+                for entity in p.entities.iter().filter(|entity| {
+                    entity.selected && entity.span.overlaps(span) && entity.span != span
+                }) {
+                    conflict_count += 1;
+                    if conflicts.len() == 20 {
+                        continue;
+                    }
+                    let region = p
+                        .regions
+                        .iter()
+                        .find(|region| region.entity_id == Some(entity.id));
+                    let value = &text[entity.span.start..entity.span.end];
+                    conflicts.push(TextConflict {
+                        entity_type: entity.entity_type.clone(),
+                        type_label: domain::type_label(&entity.entity_type).into(),
+                        replacement: domain::replacement(entity, value, &p.policies),
+                        context: context(text, entity.span),
+                        page: region.map(|region| region.page),
+                        polygon: region
+                            .filter(|region| preview_page == Some(region.page))
+                            .map(|region| region.polygon.clone()),
+                    });
+                }
                 Ok(TextMatch {
                     id: match_id(span, query),
                     display: span.utf16(text)?,
-                    context,
-                    conflicts: p
-                        .entities
-                        .iter()
-                        .filter(|e| e.selected && e.span.overlaps(span) && e.span != span)
-                        .count(),
+                    context: context(text, span),
+                    conflicts: conflict_count,
+                    conflict_details: conflicts,
                     locatable: span.end <= p.document.text.len()
                         || maps
                             .iter()
                             .any(|(line, _)| span.start >= line.start && span.end <= line.end),
-                    page: maps
-                        .iter()
-                        .find(|(line, _)| span.start >= line.start && span.end <= line.end)
-                        .map(|(_, region)| region.page),
+                    page: line.map(|(_, region)| region.page),
+                    polygon,
                 })
             })
             .collect::<Result<_>>()?;
         Ok(TextMatches {
             revision: p.revision,
+            total,
             items,
         })
     }
@@ -328,7 +392,7 @@ mod tests {
         }
     }
     fn request(e: &Engine, id: Uuid, query: &str, replacement: &str) -> ApplyText {
-        let found = e.find_text(id, query).unwrap();
+        let found = e.find_text(id, query, None).unwrap();
         ApplyText {
             query: query.into(),
             replacement: replacement.into(),
@@ -344,7 +408,7 @@ mod tests {
         let mut e = engine(dir.path());
         let task = e.analyze_text("😀青岛市 青岛市 公开文字".into()).unwrap();
         let id = task.meta.id;
-        let matches = e.find_text(id, "青岛市").unwrap();
+        let matches = e.find_text(id, "青岛市", None).unwrap();
         assert_eq!(matches.items.len(), 2);
         assert_eq!(matches.items[0].display.start, 2);
         let args = request(&e, id, "青岛市", "某地");
@@ -475,6 +539,9 @@ mod tests {
         }];
         e.store.save_payload(id, &p).unwrap();
         e.save_review(id, &p).unwrap();
+        let preview = e.find_text(id, "青岛市", Some(0)).unwrap();
+        assert_eq!(preview.items.len(), 2);
+        assert!(preview.items.iter().all(|item| item.polygon.is_some()));
         let updated = e.apply_text(id, request(&e, id, "青岛市", "某地")).unwrap();
         assert_eq!(updated.regions.iter().filter(|r| r.selected).count(), 2);
         let source = p.document.original.clone();

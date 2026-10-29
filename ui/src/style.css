@@ -885,6 +885,20 @@ dd {
   fill: rgba(25, 121, 109, 0.12);
   stroke: #19796d;
 }
+.region-layer polygon.preview-match {
+  fill: rgba(20, 132, 145, 0.18);
+  stroke: #087f8c;
+  stroke-width: 2px;
+  stroke-dasharray: 5 3;
+  pointer-events: none;
+}
+.region-layer polygon.preview-conflict {
+  fill: rgba(197, 79, 48, 0.22);
+  stroke: #bd4a31;
+  stroke-width: 2px;
+  stroke-dasharray: 3 2;
+  pointer-events: none;
+}
 .region-layer polygon.ocr:not(.selected) {
   stroke: #a8b2bf;
   stroke-dasharray: 4 3;
@@ -2127,9 +2141,48 @@ mark.focused {
   border-bottom: 1px solid #dce3e0;
   flex-shrink: 0;
 }
+.leave-result-dialog {
+  min-width: min(420px, calc(100vw - 48px));
+}
+.task-recovery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.task-recovery small {
+  color: #635222;
+}
 .quick-redaction h3 {
   margin: 0 0 8px;
   font-size: 15px;
+}
+.quick-scope {
+  font-weight: 600;
+  color: #1c4b55;
+}
+.quick-conflict-dialog {
+  width: min(620px, calc(100vw - 48px));
+  max-height: min(80vh, 720px);
+  overflow: auto;
+}
+.quick-conflict-list {
+  display: grid;
+  gap: 7px;
+  max-height: 40vh;
+  overflow: auto;
+  margin: 12px 0;
+}
+.quick-conflict-list > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 12px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.quick-conflict-list small {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
 }
 .quick-redaction p {
   font-size: 13px;

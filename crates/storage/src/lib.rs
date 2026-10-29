@@ -601,6 +601,21 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn last_output_location_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let key = Zeroizing::new([45; 32]);
+        let store = Store::open(directory.path(), key.clone()).unwrap();
+        let location = files::LastOutputLocation {
+            root: output.path().to_path_buf(),
+            relative: "客户/项目A".into(),
+        };
+        store.save_last_output_location(&location).unwrap();
+        drop(store);
+        let store = Store::open(directory.path(), key).unwrap();
+        assert_eq!(store.last_output_location().unwrap(), Some(location));
+    }
     fn sample_meta(index: u64) -> TaskMeta {
         serde_json::from_value(serde_json::json!({
             "id": Uuid::new_v4(), "kind":"txt", "state":"completed",

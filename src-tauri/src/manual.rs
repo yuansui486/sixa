@@ -4,8 +4,9 @@ pub async fn find_text(
     state: Shared<'_>,
     id: Uuid,
     query: String,
+    preview_page: Option<u32>,
 ) -> Result<task_engine::manual::TextMatches> {
-    work(state, move |e| e.find_text(id, &query)).await
+    work(state, move |e| e.find_text(id, &query, preview_page)).await
 }
 #[tauri::command]
 pub async fn apply_text(

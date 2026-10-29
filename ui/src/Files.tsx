@@ -23,7 +23,7 @@ export function FileSaveNotice({ taskId }: { taskId: string }) {
     );
   if (files.isPending) return null;
   if (!record)
-    return <p className="export-notice">结果已生成，尚未保存到文件夹。</p>;
+    return <p className="export-notice">预览已生成，尚未保存到文件夹。</p>;
   return (
     <div
       className={record.error ? "error export-notice" : "export-notice"}

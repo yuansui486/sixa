@@ -391,7 +391,17 @@ function App({
   const navigate = useNavigate();
   const preferences = usePreferences();
   const [navigationError, setNavigationError] = useState("");
-  const activeTaskId = useWorkbench((state) => state.task?.meta.id ?? null);
+  const activeTask = useWorkbench((state) => state.task);
+  const activeTaskId = activeTask?.meta.id ?? null;
+  const [leaveTarget, setLeaveTarget] = useState<string | null>(null);
+  const [leaveSaveOpen, setLeaveSaveOpen] = useState(false);
+  const leaveDialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (leaveTarget && !leaveDialog.current?.open)
+      leaveDialog.current?.showModal();
+    else if (!leaveTarget && leaveDialog.current?.open)
+      leaveDialog.current.close();
+  }, [leaveTarget]);
   const inActiveWorkbench = location.pathname === "/" && !!activeTaskId;
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [preparing, setPreparing] = useState(true);
@@ -563,9 +573,24 @@ function App({
             if (!anchor) return;
             event.preventDefault();
             try {
+              const destination = anchor.hash.replace(/^#/, "") || "/";
+              if (
+                destination !== "/" &&
+                location.pathname === "/" &&
+                activeTask &&
+                ["completed", "partial"].includes(activeTask.meta.state)
+              ) {
+                const outputs = await call("query_output_files", {
+                  query: { task_id: activeTask.meta.id },
+                });
+                if (!outputs.items.some((file) => !file.error && file.exists)) {
+                  setLeaveTarget(destination);
+                  return;
+                }
+              }
               await flushReview();
               setNavigationError("");
-              navigate(anchor.hash.replace(/^#/, "") || "/");
+              navigate(destination);
             } catch (error) {
               setNavigationError(message(error));
             }
@@ -661,6 +686,61 @@ function App({
           <span className="sidebar-label">折叠侧边栏</span>
         </button>
       </aside>
+      {leaveTarget && activeTask && (
+        <dialog
+          className="save-dialog leave-result-dialog"
+          ref={leaveDialog}
+          aria-label="结果尚未保存"
+          onCancel={(event) => {
+            event.preventDefault();
+            setLeaveTarget(null);
+          }}
+        >
+          <h2>结果尚未保存</h2>
+          <p>
+            “{activeTask.meta.display_name || "当前文件"}
+            ”的预览已生成，尚未保存到文件夹。
+          </p>
+          <p>离开后仍可在任务历史中打开任务并继续保存。</p>
+          <div className="save-dialog-actions">
+            <button className="secondary" onClick={() => setLeaveTarget(null)}>
+              留在任务
+            </button>
+            <button
+              className="secondary"
+              onClick={() => {
+                setLeaveTarget(null);
+                useWorkbench.getState().setTask(null);
+                useWorkbench.getState().setBatchId(null);
+                navigate(leaveTarget);
+              }}
+            >
+              暂不保存并离开
+            </button>
+            <button onClick={() => setLeaveSaveOpen(true)}>保存并离开</button>
+          </div>
+        </dialog>
+      )}
+      {leaveSaveOpen && activeTask && (
+        <SaveResult
+          target={{
+            id: activeTask.meta.id,
+            name: resultName(
+              activeTask.meta.display_name,
+              activeTask.extension,
+            ),
+          }}
+          onClose={() => setLeaveSaveOpen(false)}
+          onSaved={() => {
+            setLeaveSaveOpen(false);
+            const destination = leaveTarget;
+            setLeaveTarget(null);
+            useWorkbench.getState().setTask(null);
+            useWorkbench.getState().setBatchId(null);
+            if (destination) navigate(destination);
+          }}
+        />
+      )}
       <main className={inActiveWorkbench ? "active-workbench-main" : ""}>
         {auth.offline && (
           <div className="offline-banner" role="status">
@@ -1367,7 +1447,8 @@ function VisualPreview({
                   (region) =>
                     showHelpers ||
                     region.source === "manual" ||
-                    region.source === "entity",
+                    region.source === "entity" ||
+                    region.preview_kind != null,
                 )
                 .map((region) => (
                   <polygon
@@ -1376,7 +1457,7 @@ function VisualPreview({
                     points={region.polygon
                       .map((item) => `${item.x},${item.y}`)
                       .join(" ")}
-                    className={`${region.source} ${region.selected ? "selected" : ""} ${focusedId && (focusedId === region.entity_id || focusedId === region.id) ? "focused" : ""}`}
+                    className={`${region.source} ${region.selected ? "selected" : ""} ${region.preview_kind === "match" ? "preview-match" : region.preview_kind === "conflict" ? "preview-conflict" : ""} ${focusedId && (focusedId === region.entity_id || focusedId === region.id) ? "focused" : ""}`}
                     onPointerDown={(event) => {
                       if (!drawMode) {
                         event.stopPropagation();
@@ -1516,6 +1597,17 @@ function Workbench() {
   const [pageInput, setPageInput] = useState<string | null>(null);
   const [exportedPath, setExportedPath] = useState("");
   const [savingResult, setSavingResult] = useState(false);
+  const [matchPreviewRegions, setMatchPreviewRegions] = useState<Region[]>([]);
+  const [leaveRequest, setLeaveRequest] = useState<
+    (() => Promise<void>) | null
+  >(null);
+  const leaveDialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (leaveRequest && !leaveDialog.current?.open)
+      leaveDialog.current?.showModal();
+    else if (!leaveRequest && leaveDialog.current?.open)
+      leaveDialog.current.close();
+  }, [leaveRequest]);
   const [selectedText, setSelectedText] = useState("");
   const [selectionToken, setSelectionToken] = useState(0);
   const [locateSpan, setLocateSpan] = useState<{
@@ -1614,6 +1706,7 @@ function Workbench() {
     setFilter("");
     setDrawMode(false);
     setHelperRegion(null);
+    setMatchPreviewRegions([]);
     setPageNumber(1);
     setPageInput(null);
     setOfficeView("body");
@@ -2003,6 +2096,25 @@ function Workbench() {
     });
 
   const exportFile = () => setSavingResult(true);
+  const requestLeave = async (leave: () => Promise<void>) => {
+    const currentTask = task;
+    if (!currentTask) return;
+    if (["completed", "partial"].includes(currentTask.meta.state)) {
+      try {
+        const outputs = await call("query_output_files", {
+          query: { task_id: currentTask.meta.id },
+        });
+        if (!outputs.items.some((file) => !file.error && file.exists)) {
+          setLeaveRequest(() => leave);
+          return;
+        }
+      } catch (error) {
+        action.setError(message(error));
+        return;
+      }
+    }
+    await leave();
+  };
 
   const batchItems =
     batch.data?.items.filter(
@@ -2026,7 +2138,11 @@ function Workbench() {
       }
       const next = batchItems[batchIndex + direction];
       if (next?.task_id) setTask(await call("task_view", { id: next.task_id }));
-      else navigate(`/batch?id=${batchId}`);
+      else {
+        setTask(null);
+        setBatchId(null);
+        navigate(`/batch?id=${batchId}`);
+      }
     });
 
   useEffect(() => {
@@ -2344,7 +2460,9 @@ function Workbench() {
           drawMode={drawMode}
           onUpdate={editRegion}
           preview={completedResult ?? documentPreview}
-          regions={completedResult ? [] : liveRegions}
+          regions={
+            completedResult ? [] : [...liveRegions, ...matchPreviewRegions]
+          }
           result={result && !completedResult}
           editable={reviewing && !working && !split}
           showHelpers={showHelpers}
@@ -2391,6 +2509,37 @@ function Workbench() {
   return (
     <div className="task-content compact-workbench">
       <Feedback {...action} />
+      {task.meta.error_info && (
+        <div className="hint-banner task-recovery" role="alert">
+          <strong>{task.meta.error_info.title}</strong>
+          <span>{task.meta.error_info.detail}</span>
+          <small>{task.meta.error_info.recovery_action}</small>
+          {task.meta.error_info.code === "MODELS_NOT_READY" && (
+            <button className="secondary" onClick={() => navigate("/models")}>
+              前往模型管理
+            </button>
+          )}
+          {task.meta.error_info.retryable &&
+            ["failed", "cancelled"].includes(task.meta.state) && (
+              <button
+                className="secondary"
+                disabled={working}
+                onClick={() =>
+                  void action.run(async () => {
+                    setTask(await call("retry_task", { id: task.meta.id }));
+                  })
+                }
+              >
+                重新分析
+              </button>
+            )}
+          {task.meta.error_info.code === "UNSUPPORTED_FORMAT" && (
+            <button className="secondary" onClick={() => setTask(null)}>
+              返回选择文件
+            </button>
+          )}
+        </div>
+      )}
       <div className="task-commandbar">
         <div className="task-identity">
           {batchId && (
@@ -2399,10 +2548,14 @@ function Workbench() {
               aria-label="返回批次"
               title="返回批次"
               onClick={() =>
-                action.run(async () => {
-                  await flushReview();
-                  navigate(`/batch?id=${batchId}`);
-                })
+                void requestLeave(() =>
+                  action.run(async () => {
+                    await flushReview();
+                    setTask(null);
+                    setBatchId(null);
+                    navigate(`/batch?id=${batchId}`);
+                  }),
+                )
               }
             >
               <ChevronLeft size={17} />
@@ -2448,12 +2601,14 @@ function Workbench() {
             className="secondary"
             disabled={working}
             onClick={() =>
-              action.run(async () => {
-                await flushReview();
-                setTask(null);
-                setBatchId(null);
-                navigate("/history");
-              })
+              void requestLeave(() =>
+                action.run(async () => {
+                  await flushReview();
+                  setTask(null);
+                  setBatchId(null);
+                  navigate("/history");
+                }),
+              )
             }
           >
             返回
@@ -2484,13 +2639,15 @@ function Workbench() {
             className="secondary"
             disabled={working}
             onClick={() =>
-              action.run(async () => {
-                await flushReview();
-                setTask(null);
-                setBatchId(null);
-                setPassword("");
-                setConfirmPassword("");
-              })
+              void requestLeave(() =>
+                action.run(async () => {
+                  await flushReview();
+                  setTask(null);
+                  setBatchId(null);
+                  setPassword("");
+                  setConfirmPassword("");
+                }),
+              )
             }
           >
             新建任务
@@ -2528,13 +2685,13 @@ function Workbench() {
               }
             >
               {working ? <LoaderCircle size={16} className="spin" /> : null}
-              生成脱敏文件
+              生成预览
             </button>
           )}
-          {task.meta.state === "completed" && (
+          {["completed", "partial"].includes(task.meta.state) && (
             <button disabled={working} onClick={exportFile}>
               <Download size={16} />
-              保存并返回
+              保存到文件夹
             </button>
           )}
           {["failed", "cancelled"].includes(task.meta.state) && (
@@ -2608,11 +2765,14 @@ function Workbench() {
           <button
             className="secondary"
             disabled={working || batchIndex <= 0}
-            onClick={() => void stepBatch(-1)}
+            onClick={() => void requestLeave(() => stepBatch(-1))}
           >
             上一份
           </button>
-          <button disabled={working} onClick={() => void stepBatch(1, true)}>
+          <button
+            disabled={working}
+            onClick={() => void requestLeave(() => stepBatch(1, true))}
+          >
             {batchIndex === batchItems.length - 1
               ? "检查完成，返回批次"
               : "检查完成，下一份"}
@@ -2627,8 +2787,42 @@ function Workbench() {
           </button>
         </p>
       )}
-      {task.meta.state === "completed" && (
+      {["completed", "partial"].includes(task.meta.state) && (
         <FileSaveNotice taskId={task.meta.id} />
+      )}
+      {leaveRequest && (
+        <dialog
+          className="save-dialog leave-result-dialog"
+          ref={leaveDialog}
+          aria-label="结果尚未保存"
+          onCancel={(event) => {
+            event.preventDefault();
+            setLeaveRequest(null);
+          }}
+        >
+          <h2>结果尚未保存</h2>
+          <p>
+            “{task.meta.display_name || "当前文件"}
+            ”的预览已生成，尚未保存到文件夹。
+          </p>
+          <p>暂不保存后，任务仍会保留在历史记录中。</p>
+          <div className="save-dialog-actions">
+            <button className="secondary" onClick={() => setLeaveRequest(null)}>
+              留在任务
+            </button>
+            <button
+              className="secondary"
+              onClick={() => {
+                const leave = leaveRequest;
+                setLeaveRequest(null);
+                void leave();
+              }}
+            >
+              暂不保存
+            </button>
+            <button onClick={() => setSavingResult(true)}>保存并继续</button>
+          </div>
+        </dialog>
       )}
       {savingResult && (
         <SaveResult
@@ -2639,6 +2833,12 @@ function Workbench() {
           onClose={() => setSavingResult(false)}
           onSaved={(where) => {
             setSavingResult(false);
+            if (leaveRequest) {
+              const leave = leaveRequest;
+              setLeaveRequest(null);
+              void leave();
+              return;
+            }
             if (where.external) {
               setExportedPath(where.path);
             } else {
@@ -3209,8 +3409,29 @@ function Workbench() {
                   id={task.meta.id}
                   revision={task.revision}
                   editable={!!reviewing && !working}
+                  fileName={
+                    task.meta.display_name || `未命名.${task.extension}`
+                  }
                   selectedText={selectedText}
                   selectionToken={selectionToken}
+                  onPreview={(regions, page) => {
+                    setMatchPreviewRegions(regions);
+                    if (page != null) {
+                      setPreviewMode("source");
+                      setOfficeView("images");
+                      setPageNumber(page + 1);
+                      requestAnimationFrame(() =>
+                        requestAnimationFrame(() =>
+                          canvasRef.current
+                            ?.querySelector(`[data-page="${page}"]`)
+                            ?.scrollIntoView({
+                              block: "start",
+                              behavior: "smooth",
+                            }),
+                        ),
+                      );
+                    }
+                  }}
                   onLocate={(span, page) => {
                     setPreviewMode("source");
                     if (page != null) {

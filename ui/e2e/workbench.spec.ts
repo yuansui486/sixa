@@ -641,7 +641,7 @@ test("完成后的输出失败显示重试而不回退成原图", async ({ page 
     };
   });
   await selectPdf(page);
-  await page.getByRole("button", { name: "生成脱敏文件", exact: true }).click();
+  await page.getByRole("button", { name: "生成预览", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "重新加载结果" }),
   ).toBeVisible();
@@ -1056,7 +1056,7 @@ test("高级设置默认收起且恢复包要求两次口令一致", async ({ pa
   await page.getByText("高级设置", { exact: true }).click();
   await expect(page.getByLabel("图片识别")).toBeVisible();
   await selectPdf(page);
-  await page.getByRole("button", { name: /生成脱敏文件/ }).click();
+  await page.getByRole("button", { name: /生成预览/ }).click();
   await page.getByText("创建可逆恢复包", { exact: true }).click();
   await page.getByLabel("恢复口令", { exact: true }).fill("password-one");
   await page.getByLabel("确认恢复口令").fill("password-two");
@@ -1803,6 +1803,21 @@ test("文件管理展示默认目录，筛选与空状态在桌面尺寸可用",
   ).toBe(true);
 });
 
+test("离开已生成但未保存的任务前提供选择，并保留历史记录", async ({ page }) => {
+  await page.goto("/");
+  await selectPdf(page);
+  await page.getByRole("button", { name: "生成预览", exact: true }).click();
+  await expect(page.getByText("预览已生成，尚未保存到文件夹。")).toBeVisible();
+  await page.getByRole("link", { name: "文件管理" }).click();
+  const dialog = page.getByRole("dialog", { name: "结果尚未保存" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "暂不保存并离开" }).click();
+  await expect(page.getByRole("heading", { name: "文件管理" })).toBeVisible();
+  expect(await page.evaluate(() => window.__mock__.task.meta.state)).toBe(
+    "completed",
+  );
+});
+
 test("Mac 接入程序缺失时不提供无效配置，并提供明确修复方法", async ({
   page,
 }) => {
@@ -1959,14 +1974,14 @@ test("@workflow 保存选择子目录并返回文件管理，取消不导出", a
   });
   await page.goto("/");
   await selectPdf(page);
-  await page.getByRole("button", { name: "生成脱敏文件", exact: true }).click();
-  await page.getByRole("button", { name: "保存并返回", exact: true }).click();
+  await page.getByRole("button", { name: "生成预览", exact: true }).click();
+  await page.getByRole("button", { name: "保存到文件夹", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "保存脱敏文件" });
   await dialog.getByRole("button", { name: "取消", exact: true }).click();
   expect(
     await page.evaluate(() => window.__mock__.calls.save_result || 0),
   ).toBe(0);
-  await page.getByRole("button", { name: "保存并返回", exact: true }).click();
+  await page.getByRole("button", { name: "保存到文件夹", exact: true }).click();
   await dialog.getByRole("button", { name: "项目甲", exact: true }).click();
   await expect(dialog).toContainText("C:/结果/项目甲");
   await dialog.getByRole("button", { name: "保存到当前文件夹" }).click();
@@ -2082,12 +2097,14 @@ test("@workflow Word 选词快速替换、保存规则及撤销无需切页", as
       if (command === "find_text")
         return {
           revision: window.__mock__.task.revision,
+          total: 1,
           items: [
             {
               id: "match",
               display: { start: 0, end: 3 },
               context: "青岛市",
               conflicts: 0,
+              conflict_details: [],
               locatable: true,
             },
           ],
@@ -2153,7 +2170,7 @@ test("@workflow Word 选词快速替换、保存规则及撤销无需切页", as
   await page.getByLabel("同时保存为规则，供以后使用").check();
   await page.getByLabel("快捷规则名称").fill("客户地点");
   await page.getByRole("button", { name: "查找", exact: true }).click();
-  await expect(page.getByText("找到 1 处")).toBeVisible();
+  await expect(page.getByText("当前文件共命中 1 处")).toBeVisible();
   await page.getByRole("button", { name: "全部替换", exact: true }).click();
   await expect(page.getByText("已替换 1 处并保存规则。")).toBeVisible();
   expect(await page.evaluate(() => window.__mock__.calls.apply_text)).toBe(1);

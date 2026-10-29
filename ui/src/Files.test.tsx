@@ -40,6 +40,7 @@ beforeEach(() => {
   current = { ...item };
   vi.mocked(call).mockImplementation(async (name) => {
     if (name === "get_file_directory") return "C:/结果";
+    if (name === "get_last_output_location") return null;
     if (name === "browse_directory")
       return {
         root: "C:/结果",

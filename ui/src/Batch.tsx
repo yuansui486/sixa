@@ -302,7 +302,7 @@ export function Batch() {
                     })
                   }
                 >
-                  生成脱敏文件
+                  生成批量预览
                 </button>
               )}
               {["failed", "cancelled", "partial"].includes(

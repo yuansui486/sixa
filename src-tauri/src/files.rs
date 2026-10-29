@@ -1,4 +1,5 @@
 use crate::*;
+use std::path::Path;
 use storage::files::{OutputPage, OutputQuery, OutputRecord};
 
 pub(crate) fn default_directory(app: &tauri::AppHandle) -> Result<PathBuf> {
@@ -15,6 +16,39 @@ pub(crate) fn root(engine: &Engine, default: Result<PathBuf>) -> Result<PathBuf>
 }
 pub(crate) fn configured_root(engine: &Engine, default: Result<PathBuf>) -> Result<PathBuf> {
     engine.store.output_directory()?.map(Ok).unwrap_or(default)
+}
+
+fn last_location(engine: &Engine, default: Result<PathBuf>) -> Result<Option<String>> {
+    let Some(saved) = engine.store.last_output_location()? else {
+        return Ok(None);
+    };
+    let root = configured_root(engine, default)?;
+    if !root.exists() {
+        return Ok(None);
+    }
+    let root = root.canonicalize()?;
+    if saved.root != root || storage::directory::resolve(&root, &saved.relative).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(saved.relative))
+}
+
+fn remember_location(engine: &Engine, root: &Path, relative: &str) -> Result<()> {
+    engine
+        .store
+        .save_last_output_location(&storage::files::LastOutputLocation {
+            root: root.canonicalize()?,
+            relative: relative.to_owned(),
+        })
+}
+
+#[tauri::command]
+pub async fn get_last_output_location(
+    state: Shared<'_>,
+    app: tauri::AppHandle,
+) -> Result<Option<String>> {
+    let default = default_directory(&app);
+    work(state, move |e| last_location(e, default)).await
 }
 
 #[tauri::command]
@@ -63,8 +97,11 @@ pub async fn save_result(
 ) -> Result<OutputRecord> {
     let default = default_directory(&app);
     let result = work(state, move |e| {
-        let path = storage::directory::resolve(&root(e, default)?, &relative)?;
-        e.save_result(id, &path, &name, mutation_id)
+        let root = root(e, default)?;
+        let path = storage::directory::resolve(&root, &relative)?;
+        let output = e.save_result(id, &path, &name, mutation_id)?;
+        remember_location(e, &root, &relative)?;
+        Ok(output)
     })
     .await?;
     let _ = app.emit("files-updated", ());
@@ -81,12 +118,53 @@ pub async fn copy_result(
 ) -> Result<OutputRecord> {
     let default = default_directory(&app);
     let result = work(state, move |e| {
-        e.copy_result(
-            id,
-            &storage::directory::resolve(&root(e, default)?, &relative)?,
-            &name,
-            mutation_id,
-        )
+        let root = root(e, default)?;
+        let path = storage::directory::resolve(&root, &relative)?;
+        let output = e.copy_result(id, &path, &name, mutation_id)?;
+        remember_location(e, &root, &relative)?;
+        Ok(output)
+    })
+    .await?;
+    let _ = app.emit("files-updated", ());
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn save_result_to_last(
+    state: Shared<'_>,
+    app: tauri::AppHandle,
+    id: Uuid,
+    name: String,
+    mutation_id: Uuid,
+) -> Result<OutputRecord> {
+    let default = default_directory(&app)?;
+    let result = work(state, move |e| {
+        let relative = last_location(e, Ok(default.clone()))?
+            .ok_or_else(|| Error::Invalid("尚未选择过保存位置，请先选择文件夹".into()))?;
+        let root = root(e, Ok(default))?;
+        let path = storage::directory::resolve(&root, &relative)?;
+        e.save_result(id, &path, &name, mutation_id)
+    })
+    .await?;
+    let _ = app.emit("files-updated", ());
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn copy_result_to_last(
+    state: Shared<'_>,
+    app: tauri::AppHandle,
+    id: Uuid,
+    name: String,
+    mutation_id: Uuid,
+) -> Result<OutputRecord> {
+    let default = default_directory(&app)?;
+    let result = work(state, move |e| {
+        let relative = last_location(e, Ok(default.clone()))?
+            .ok_or_else(|| Error::Invalid("上次保存位置不可用，请选择文件夹".into()))?;
+        let root = root(e, Ok(default))?;
+        let path = storage::directory::resolve(&root, &relative)?;
+        e.copy_result(id, &path, &name, mutation_id)
     })
     .await?;
     let _ = app.emit("files-updated", ());

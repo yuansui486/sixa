@@ -1,6 +1,12 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LastOutputLocation {
+    pub root: PathBuf,
+    pub relative: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutputRecord {
     pub id: Uuid,
@@ -42,6 +48,15 @@ pub struct OutputPage {
 }
 
 impl Store {
+    pub fn last_output_location(&self) -> Result<Option<LastOutputLocation>> {
+        Ok(self
+            .config::<LastOutputLocation>("last_output_location")?
+            .into_iter()
+            .next())
+    }
+    pub fn save_last_output_location(&self, location: &LastOutputLocation) -> Result<()> {
+        self.put("last_output_location", "app", location)
+    }
     pub fn output_state(&self, id: Uuid) -> Result<&'static str> {
         let mut stmt = self.db.prepare("SELECT json_extract(data,'$.path'), json_extract(data,'$.error') FROM outputs WHERE task_id=?1").map_err(db_err)?;
         let rows = stmt

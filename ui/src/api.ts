@@ -41,13 +41,23 @@ export interface DirectoryPage {
 }
 export interface TextMatches {
   revision: number;
+  total: number;
   items: {
     id: string;
     display: { start: number; end: number };
     context: string;
     conflicts: number;
+    conflict_details: {
+      entity_type: string;
+      type_label: string;
+      replacement: string;
+      context: string;
+      page?: number | null;
+      polygon?: Point[] | null;
+    }[];
     locatable: boolean;
     page?: number | null;
+    polygon?: Point[] | null;
   }[];
 }
 export interface TaskMeta {
@@ -121,6 +131,7 @@ export interface Region {
   score: number | null;
   rotation: number;
   replacement: string | null;
+  preview_kind?: "match" | "conflict";
 }
 export interface DocumentPreview {
   kind?: "pages" | "docx" | "office_content" | "text";
@@ -462,11 +473,26 @@ interface Commands {
     args: { id: string; relative: string; name: string; mutationId: string };
     result: OutputFile;
   };
+  save_result_to_last: {
+    args: { id: string; name: string; mutationId: string };
+    result: OutputFile;
+  };
+  copy_result_to_last: {
+    args: { id: string; name: string; mutationId: string };
+    result: OutputFile;
+  };
+  get_last_output_location: {
+    args: undefined;
+    result: string | null;
+  };
   copy_result: {
     args: { id: string; relative: string; name: string; mutationId: string };
     result: OutputFile;
   };
-  find_text: { args: { id: string; query: string }; result: TextMatches };
+  find_text: {
+    args: { id: string; query: string; previewPage?: number };
+    result: TextMatches;
+  };
   apply_text: {
     args: {
       id: string;

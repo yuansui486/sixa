@@ -72,6 +72,12 @@ export function Tasks() {
       navigate("/");
     }
   };
+  const openSavedFile = async (taskId: string) => {
+    const output = await call("query_output_files", { query: { task_id: taskId } });
+    const file = output.items.find((item) => item.exists && !item.error);
+    if (!file) throw Error("已保存文件不存在或已移动，请重新保存");
+    await call("open_output_file", { id: file.id });
+  };
   return (
     <>
       {saving && (
@@ -197,7 +203,7 @@ export function Tasks() {
                             {
                               saved: "已保存",
                               missing: "文件已移动或删除",
-                              unsaved: "已生成，未保存",
+                              unsaved: "已生成未保存",
                             }[tasks.data.output_states[item.id]]
                           }
                         </small>
@@ -232,8 +238,17 @@ export function Tasks() {
                           }
                           onClick={() => void run(() => openTask(item))}
                         >
-                          打开
+                          打开任务
                         </button>
+                        {tasks.data?.output_states?.[item.id] === "saved" && (
+                          <button
+                            className="secondary"
+                            disabled={busy}
+                            onClick={() => void run(() => openSavedFile(item.id))}
+                          >
+                            打开已保存文件
+                          </button>
+                        )}
                         {item.state === "completed" &&
                           item.kind !== "batch" && (
                             <button

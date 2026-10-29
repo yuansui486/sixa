@@ -32,6 +32,7 @@ export function SaveResult({
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const initialized = useRef(false);
   const operation = useRef({ key: "", id: crypto.randomUUID() });
   const dialog = useRef<HTMLDialogElement>(null);
   const client = useQueryClient();
@@ -39,6 +40,16 @@ export function SaveResult({
     queryKey: ["save-directory", relative, offset],
     queryFn: () => call("browse_directory", { query: { relative, offset } }),
   });
+  const lastLocation = useQuery({
+    queryKey: ["last-output-location"],
+    queryFn: () => call("get_last_output_location"),
+  });
+  useEffect(() => {
+    if (initialized.current || directory.isPending || lastLocation.isPending)
+      return;
+    initialized.current = true;
+    if (lastLocation.data) setRelative(lastLocation.data);
+  }, [directory.isPending, lastLocation.data, lastLocation.isPending]);
   useEffect(() => {
     dialog.current?.showModal();
   }, []);
@@ -54,12 +65,38 @@ export function SaveResult({
       setBusy(false);
     }
   };
-  const finish = async (path: string, external = false) => {
+  const finish = async (
+    path: string,
+    external = false,
+    savedRelative = relative,
+  ) => {
     await client.invalidateQueries({ queryKey: ["output-files"] });
     await client.invalidateQueries({ queryKey: ["directory"] });
     await client.invalidateQueries({ queryKey: ["tasks"] });
-    onSaved({ path, relative, external });
+    await client.invalidateQueries({ queryKey: ["last-output-location"] });
+    onSaved({ path, relative: savedRelative, external });
   };
+  const saveLast = () =>
+    void run(async () => {
+      if (!lastLocation.data) return;
+      const key = `last:${lastLocation.data}:${name}`;
+      if (operation.current.key !== key)
+        operation.current = { key, id: crypto.randomUUID() };
+      const mutationId = operation.current.id;
+      const result = target.outputId
+        ? await call("copy_result_to_last", {
+            id: target.outputId,
+            name,
+            mutationId,
+          })
+        : await call("save_result_to_last", {
+            id: target.id!,
+            name,
+            mutationId,
+          });
+      setRelative(lastLocation.data);
+      await finish(result.path, false, lastLocation.data);
+    });
   return createPortal(
     <dialog
       className="save-dialog"
@@ -72,6 +109,11 @@ export function SaveResult({
     >
       <h2>保存脱敏文件</h2>
       <p className="muted">选择保存位置，已有文件不会被覆盖。</p>
+      {!lastLocation.data && !lastLocation.isPending && (
+        <p className="hint-banner">
+          首次保存请选择文件夹；私匣会记住成功使用的位置。
+        </p>
+      )}
       <p className="file-path">{directory.data?.path ?? "正在读取目录…"}</p>
       <div className="row-actions">
         <button
@@ -173,6 +215,16 @@ export function SaveResult({
         </p>
       )}
       <div className="save-dialog-actions">
+        {lastLocation.data && (
+          <button
+            className="secondary"
+            disabled={busy || !name.trim()}
+            onClick={saveLast}
+          >
+            {busy && <LoaderCircle className="spin" size={16} />}
+            保存到上次位置
+          </button>
+        )}
         <button
           className="text-action"
           disabled={busy || !directory.data}
